@@ -50,6 +50,7 @@
       org-html-validation-link nil
       org-export-kill-product-buffer-when-displayed t
       org-tags-column 80
+      org-capture-templates nil
       org-agenda-files (directory-files-recursively "~/.org/" "\\.org$")
       org-directory "~/.org/"
       )
@@ -207,7 +208,7 @@ typical word processor."
   (setq org-agenda-compact-blocks t
         org-agenda-sticky t
         org-agenda-start-on-weekday nil
-        org-agenda-span 'day
+        org-agenda-span 'week
         org-agenda-include-diary nil
         org-agenda-sorting-strategy
         '((agenda habit-down time-up user-defined-up effort-up category-keep)
