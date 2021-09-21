@@ -49,7 +49,10 @@
       org-fast-tag-selection-single-key 'expert
       org-html-validation-link nil
       org-export-kill-product-buffer-when-displayed t
-      org-tags-column 80)
+      org-tags-column 80
+      org-agenda-files (directory-files-recursively "~/.org/" "\\.org$")
+      org-directory "~/.org/"
+      )
 
 
 ;; Lots of stuff from http://doc.norang.ca/org-mode.html
@@ -110,12 +113,31 @@ typical word processor."
 
 (global-set-key (kbd "C-c c") 'org-capture)
 
-(setq org-capture-templates
-      `(("t" "todo" entry (file "")  ; "" => `org-default-notes-file'
-         "* NEXT %?\n%U\n" :clock-resume t)
-        ("n" "note" entry (file "")
-         "* %? :NOTE:\n%U\n%a\n" :clock-resume t)
-        ))
+(add-to-list 'org-capture-templates '("w" "taqu-work"))
+(add-to-list 'org-capture-templates
+             '("wa" "taqu-work architecture" entry
+               (file+olp "~/.org/agenda/taqu-work.org" "Architecture")
+               "* TODO %^{Task Name:}\n%u\n" :clock-in t :clock-resume t))
+(add-to-list 'org-capture-templates
+             '("i" "Inbox" entry (file "~/.org/inbox.org")
+               "* %U - %^{heading} %^g\n %?\n"))
+(add-to-list 'org-capture-templates
+             '("s" "Inspiration" entry (file "~/.org/notes/inspiration.org")
+               "* %U - %^{heading} %^g\n %?\n"))
+(add-to-list 'org-capture-templates
+             '("p" "Paper" entry (file "~/.org/agenda/paper.org")
+               "* TODO %^{Task Name:}\n%u\n%a\n"))
+(add-to-list 'org-capture-templates
+             '("j" "Journal" entry (file+olp+datetree "~/.org/notes/journal.org")
+               "* %U - %^{heading}\n  %?"))
+(add-to-list 'org-capture-templates '("g" "Goal"))
+(add-to-list 'org-capture-templates
+             '("gm" "Mid-term Goal (< 1 year)" entry (file+olp "~/.org/notes/goal.org" "Mid-term Goals")
+               (file "~/.org/template/goal-template.org")))
+(add-to-list 'org-capture-templates
+             '("gl" "Long-term Goal (3~5year)" entry (file+olp "~/.org/notes/goal.org" "Long-term Goals")
+               (file "~/.org/template/goal-template.org")))
+
 
 
 
