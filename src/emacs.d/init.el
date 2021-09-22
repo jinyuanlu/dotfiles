@@ -70,6 +70,7 @@
 (require 'init-windows)
 (require 'init-sessions)
 (require 'init-mmm)
+(require 'init-hydra)
 
 (require 'init-editing-utils)
 (require 'init-whitespace)
