@@ -4,12 +4,7 @@
 
 (require-package 'org-roam)
 
-(setq org-roam-directory
-      (expand-file-name
-       "wiki"
-       (file-name-directory
-        (directory-file-name
-         "~/.org/"))))
+(setq org-roam-directory "~/.org/wiki/")
 
 (setq org-roam-buffer-position 'bottom)
 
