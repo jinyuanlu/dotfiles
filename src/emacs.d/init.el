@@ -96,6 +96,7 @@
 (require 'init-html)
 (require 'init-css)
 (require 'init-haml)
+(require 'init-proto)
 (require 'init-http)
 (require 'init-python)
 (require 'init-haskell)
