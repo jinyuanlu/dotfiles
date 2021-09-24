@@ -92,6 +92,7 @@
 (require 'init-php)
 (require 'init-scala)
 (require 'init-org)
+(require 'init-roam)
 (require 'init-nxml)
 (require 'init-html)
 (require 'init-css)
