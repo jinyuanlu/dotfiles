@@ -76,6 +76,16 @@
         (error "Cannot open tramp file")
       (browse-url (concat "file://" file-name)))))
 
+
+;;; Open a new buffer for draft
+
+(defun new-empty-buffer ()
+  "Opens a new empty buffer."
+  (interactive)
+  (let ((buf (generate-new-buffer "draft")))
+    (switch-to-buffer buf)
+    (funcall (and default-major-mode))
+    (setq buffer-offer-save t)))
 
 (provide 'init-utils)
 ;;; init-utils.el ends here
