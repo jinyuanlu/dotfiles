@@ -1,0 +1,6 @@
+# -*- mode: snippet -*-
+# name: name main
+# key: nmain
+# group : runtime
+# --
+if __name__ == "__main__":

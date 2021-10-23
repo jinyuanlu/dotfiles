@@ -1,0 +1,9 @@
+# -*- mode: snippet -*-
+# name: tikz picture
+# key: pic
+# group : picture
+# --
+\begin{tikzpicture}[font=\sffamily,every label/.append
+style={font=\small\sffamily,align=center}]
+
+\end{tikzpicture}

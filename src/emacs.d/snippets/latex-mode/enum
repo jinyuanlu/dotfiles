@@ -1,0 +1,7 @@
+# -*- mode: snippet -*-
+# name: enumerate
+# key: enum
+# group : iterate
+# --
+\begin{enumerate}
+\end{enumerate}

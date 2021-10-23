@@ -1,0 +1,12 @@
+# -*- mode: snippet -*-
+# name: class document
+# key: clsdoc
+# group : definitions
+# --
+"""The summary line for a class docstring should fit on one line.
+
+Attributes:
+    attr1: Description of `attr1`.
+    attr2: Description of `attr2`.
+
+"""

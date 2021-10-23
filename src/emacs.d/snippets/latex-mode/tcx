@@ -1,0 +1,6 @@
+# -*- mode: snippet -*-
+# name: transform canvas x axis
+# key: tcx
+# group : picture
+# --
+transform canvas={xshift=3mm}

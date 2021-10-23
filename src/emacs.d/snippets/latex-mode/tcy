@@ -1,0 +1,6 @@
+# -*- mode: snippet -*-
+# name: transform canvas y axis
+# key: tcy
+# group : picture
+# --
+transform canvas={yshift=3mm}
