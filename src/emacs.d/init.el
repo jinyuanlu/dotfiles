@@ -62,6 +62,7 @@
 (require 'init-ibuffer)
 (require 'init-flycheck)
 (require 'init-smex)
+(require 'init-snippet)
 
 (require 'init-recentf)
 (require 'init-minibuffer)
