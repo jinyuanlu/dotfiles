@@ -140,6 +140,7 @@
 (require-package 'gnuplot)
 (require-package 'lua-mode)
 (require-package 'htmlize)
+(require-package 'counsel)
 (when *is-a-mac*
   (require-package 'osx-location))
 (maybe-require-package 'dotenv-mode)
