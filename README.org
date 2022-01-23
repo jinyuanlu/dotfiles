@@ -1,0 +1,9 @@
+* dotfiles
+
+** Usage
+   #+begin_src shell
+     git clone https://github.com/jinyuanlu/dotfiles.git
+     cd dotfiles
+     # e.g. install emacs.d into $HOME
+     stow emacs.d
+   #+end_src
