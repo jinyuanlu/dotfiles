@@ -141,7 +141,7 @@ _y_: ?y? year       _q_: quit           _L__l__c_: log = ?l?"
 "
   ("f" counsel-recentf)
   ("q" nil :color red))
-(global-set-key (kbd "C-c C-v") 'hydra-launcher/body)
+(global-set-key (kbd "C-c r") 'hydra-launcher/body)
 
 (provide 'init-hydra)
 ;;; init-hydra.el ends here
