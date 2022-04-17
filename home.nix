@@ -9,6 +9,12 @@
   home.packages = with pkgs; [
     ripgrep
     stack
+    # count disk
+    du-dust
+    # count code
+    tokei
+    # faster find
+    fd
     # dev tools
     shellcheck
   ];
