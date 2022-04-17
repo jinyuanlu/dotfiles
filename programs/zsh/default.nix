@@ -16,6 +16,7 @@
       setproxy="export ALL_PROXY=socks5://127.0.0.1:1080";
       unsetproxy="unset ALL_PROXY";
       bal="ledger -f ~/.fin/fin.dat balance";
+      ee="emacsclient";
       eth="curl 'https://min-api.cryptocompare.com/data/price?fsym=ETH&tsyms=BTC,USD,CNY' | python -m json.tool";
       btc="curl 'https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=BTC,USD,CNY' | python -m json.tool";
     };
