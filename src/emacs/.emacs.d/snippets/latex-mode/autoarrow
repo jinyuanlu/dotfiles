@@ -1,6 +1,0 @@
-# -*- mode: snippet -*-
-# name: auto arrow which should set in tikz picture
-# key: autoarrow
-# group : arrow
-# --
-every initial by arrow/.style={*-latex}

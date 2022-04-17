@@ -20,6 +20,10 @@
   # changes in each release.
   home.stateVersion = "21.11";
 
+  imports = [
+    ./programs/emacs/emacs.nix
+  ];
+
   # Let Home Manager install and manage itself.
   programs.home-manager.enable = true;
   

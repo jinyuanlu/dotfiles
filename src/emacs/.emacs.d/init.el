@@ -34,7 +34,9 @@
 ;; Bootstrap config
 
 
-(setq custom-file (locate-user-emacs-file "custom.el"))
+(setq custom-file (locate-user-emacs-file "~/.emacs.d/custom.el"))
+(load custom-file)
+
 (require 'init-utils)
 (require 'init-site-lisp) ;; Must come before elpa, as it may provide package.el
 ;; Calls (package-initialize)
@@ -60,9 +62,8 @@
 (require 'init-grep)
 (require 'init-uniquify)
 (require 'init-ibuffer)
-(require 'init-flycheck)
-(require 'init-smex)
-(require 'init-snippet)
+(require 'init-flymake)
+(require 'init-eglot)
 
 (require 'init-recentf)
 (require 'init-minibuffer)
@@ -71,7 +72,6 @@
 (require 'init-windows)
 (require 'init-sessions)
 (require 'init-mmm)
-(require 'init-hydra)
 
 (require 'init-editing-utils)
 (require 'init-whitespace)
@@ -91,14 +91,11 @@
 (require 'init-erlang)
 (require 'init-javascript)
 (require 'init-php)
-(require 'init-scala)
 (require 'init-org)
-(require 'init-roam)
 (require 'init-nxml)
 (require 'init-html)
 (require 'init-css)
 (require 'init-haml)
-(require 'init-proto)
 (require 'init-http)
 (require 'init-python)
 (require 'init-haskell)
@@ -121,6 +118,8 @@
 (require 'init-paredit)
 (require 'init-lisp)
 (require 'init-slime)
+(require 'init-clojure)
+(require 'init-clojure-cider)
 (require 'init-common-lisp)
 
 (when *spell-check-support-enabled*
@@ -140,7 +139,6 @@
 (require-package 'gnuplot)
 (require-package 'lua-mode)
 (require-package 'htmlize)
-(require-package 'counsel)
 (when *is-a-mac*
   (require-package 'osx-location))
 (maybe-require-package 'dotenv-mode)

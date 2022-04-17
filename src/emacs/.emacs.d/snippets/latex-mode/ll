@@ -1,6 +1,0 @@
-# -*- mode: snippet -*-
-# name: generate inline latex env
-# key: ll
-# group : symbols
-# --
-$$

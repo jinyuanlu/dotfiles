@@ -1,7 +1,0 @@
-# -*- mode: snippet -*-
-# name: enumerate-item
-# key: item
-# group : iterate
-# --
-\begin{itemize}
-\end{itemize}

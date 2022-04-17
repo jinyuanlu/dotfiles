@@ -49,11 +49,7 @@
       org-fast-tag-selection-single-key 'expert
       org-html-validation-link nil
       org-export-kill-product-buffer-when-displayed t
-      org-tags-column 80
-      org-capture-templates nil
-      org-agenda-files (directory-files-recursively "~/.org/" "\\.org$")
-      org-directory "~/.org/"
-      )
+      org-tags-column 80)
 
 
 ;; Lots of stuff from http://doc.norang.ca/org-mode.html
@@ -114,31 +110,12 @@ typical word processor."
 
 (global-set-key (kbd "C-c c") 'org-capture)
 
-(add-to-list 'org-capture-templates '("w" "taqu-work"))
-(add-to-list 'org-capture-templates
-             '("wa" "taqu-work architecture" entry
-               (file+olp "~/.org/agenda/taqu-work.org" "Architecture")
-               "* TODO %^{Task Name:}\n%u\n" :clock-in t :clock-resume t))
-(add-to-list 'org-capture-templates
-             '("i" "Inbox" entry (file "~/.org/inbox.org")
-               "* %U - %^{heading} %^g\n %?\n"))
-(add-to-list 'org-capture-templates
-             '("s" "Inspiration" entry (file "~/.org/notes/inspiration.org")
-               "* %U - %^{heading} %^g\n %?\n"))
-(add-to-list 'org-capture-templates
-             '("p" "Paper" entry (file "~/.org/agenda/paper.org")
-               "* TODO %^{Task Name:}\n%u\n%a\n"))
-(add-to-list 'org-capture-templates
-             '("j" "Journal" entry (file+olp+datetree "~/.org/notes/journal.org")
-               "* %U - %^{heading}\n  %?"))
-(add-to-list 'org-capture-templates '("g" "Goal"))
-(add-to-list 'org-capture-templates
-             '("gm" "Mid-term Goal (< 1 year)" entry (file+olp "~/.org/notes/goal.org" "Mid-term Goals")
-               (file "~/.org/template/goal-template.org")))
-(add-to-list 'org-capture-templates
-             '("gl" "Long-term Goal (3~5year)" entry (file+olp "~/.org/notes/goal.org" "Long-term Goals")
-               (file "~/.org/template/goal-template.org")))
-
+(setq org-capture-templates
+      `(("t" "todo" entry (file "")  ; "" => `org-default-notes-file'
+         "* NEXT %?\n%U\n" :clock-resume t)
+        ("n" "note" entry (file "")
+         "* %? :NOTE:\n%U\n%a\n" :clock-resume t)
+        ))
 
 
 
@@ -185,7 +162,8 @@ typical word processor."
 
 (setq org-todo-keywords
       (quote ((sequence "TODO(t)" "NEXT(n)" "|" "DONE(d!/!)")
-              (sequence "PROJECT(p)" "|" "DONE(d!/!)" "CANCELLED(c@/!)")))
+              (sequence "PROJECT(p)" "|" "DONE(d!/!)" "CANCELLED(c@/!)")
+              (sequence "WAITING(w@/!)" "DELEGATED(e!)" "HOLD(h)" "|" "CANCELLED(c@/!)")))
       org-todo-repeat-to-state "NEXT")
 
 (setq org-todo-keyword-faces
@@ -207,7 +185,7 @@ typical word processor."
   (setq org-agenda-compact-blocks t
         org-agenda-sticky t
         org-agenda-start-on-weekday nil
-        org-agenda-span 'week
+        org-agenda-span 'day
         org-agenda-include-diary nil
         org-agenda-sorting-strategy
         '((agenda habit-down time-up user-defined-up effort-up category-keep)
@@ -384,23 +362,27 @@ typical word processor."
 (with-eval-after-load 'org
   (org-babel-do-load-languages
    'org-babel-load-languages
-   `((R . t)
-     (ditaa . t)
-     (dot . t)
-     (emacs-lisp . t)
-     (gnuplot . t)
-     (haskell . nil)
-     (latex . t)
-     (ledger . t)
-     (ocaml . nil)
-     (octave . t)
-     (plantuml . t)
-     (python . t)
-     (ruby . t)
-     (screen . nil)
-     (,(if (locate-library "ob-sh") 'sh 'shell) . t)
-     (sql . t)
-     (sqlite . t))))
+   (seq-filter
+    (lambda (pair)
+      (featurep (intern (concat "ob-" (symbol-name (car pair))))))
+    '((R . t)
+      (ditaa . t)
+      (dot . t)
+      (emacs-lisp . t)
+      (gnuplot . t)
+      (haskell . nil)
+      (latex . t)
+      (ledger . t)
+      (ocaml . nil)
+      (octave . t)
+      (plantuml . t)
+      (python . t)
+      (ruby . t)
+      (screen . nil)
+      (sh . t) ;; obsolete
+      (shell . t)
+      (sql . t)
+      (sqlite . t)))))
 
 
 (provide 'init-org)
