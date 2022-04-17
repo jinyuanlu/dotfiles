@@ -22,6 +22,7 @@
 
   imports = [
     ./programs/emacs/emacs.nix
+    ./programs/zsh/default.nix
   ];
 
   # Let Home Manager install and manage itself.
