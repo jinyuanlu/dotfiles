@@ -1,7 +1,7 @@
 * dotfiles
 
 ** Usage
-   Install [Nix]{https://nixos.org/} and then install [home-manager]{https://github.com/nix-community/home-manager}. You should be able to run the home-manager program in a shell.
+   Install [[https://nixos.org/][nix]] and [[https://github.com/nix-community/home-manager][home-manager]] then install . You should be able to run the home-manager program in a shell.
    #+begin_src shell
      git clone https://github.com/jinyuanlu/dotfiles.git ~/.config/nixpkgs
      home-manager switch
