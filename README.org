@@ -1,9 +1,8 @@
 * dotfiles
 
 ** Usage
+   Install [Nix]{https://nixos.org/} and then install [home-manager]{https://github.com/nix-community/home-manager}. You should be able to run the home-manager program in a shell.
    #+begin_src shell
-     git clone https://github.com/jinyuanlu/dotfiles.git
-     cd dotfiles
-     # e.g. install emacs.d into $HOME
-     stow emacs.d
+     git clone https://github.com/jinyuanlu/dotfiles.git ~/.config/nixpkgs
+     home-manager switch
    #+end_src
