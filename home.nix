@@ -8,6 +8,9 @@
 
   home.packages = with pkgs; [
     ripgrep
+    stack
+    # dev tools
+    shellcheck
   ];
 
   # This value determines the Home Manager release that your
