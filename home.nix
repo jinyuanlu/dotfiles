@@ -1,7 +1,7 @@
 { config, pkgs, ... }:
 
 {
- # Home Manager needs a bit of information about you and the
+  # Home Manager needs a bit of information about you and the
   # paths it should manage.
   home.username = "lujinyuan";
   home.homeDirectory = "/Users/lujinyuan";
@@ -17,6 +17,7 @@
     fd
     # dev tools
     shellcheck
+    nixfmt
   ];
 
   # This value determines the Home Manager release that your
@@ -26,26 +27,19 @@
   #
   # You can update Home Manager without changing this value. See
   # the Home Manager release notes for a list of state version
-  # changes in each release.
+  # changes in each release.xf
   home.stateVersion = "21.11";
 
-  imports = [
-    ./programs/emacs/emacs.nix
-    ./programs/zsh/default.nix
-  ];
+  imports = [ ./programs/emacs/emacs.nix ./programs/zsh/default.nix ];
 
   # Let Home Manager install and manage itself.
   programs.home-manager.enable = true;
-  
+
   programs.git = {
-  enable = true;
-  userName = "Jinyuan Lu";
-  userEmail = "me@jinyuanlu.net";
-  ignores = [
-    ".DS_Store"
-    "*.pyc"
-  ];
+    enable = true;
+    userName = "Jinyuan Lu";
+    userEmail = "me@jinyuanlu.net";
+    ignores = [ ".DS_Store" "*.pyc" ];
   };
 
- 
 }
