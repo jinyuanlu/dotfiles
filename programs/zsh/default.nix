@@ -17,6 +17,7 @@
       bal = "ledger -f ~/.fin/fin.dat balance";
       ee = "emacsclient";
       formatnix = "fd -e nix -X nixfmt";
+      ls = "ls -G";
       eth =
         "curl 'https://min-api.cryptocompare.com/data/price?fsym=ETH&tsyms=BTC,USD,CNY' | python -m json.tool";
       btc =
