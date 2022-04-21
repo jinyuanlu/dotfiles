@@ -49,6 +49,7 @@ Fix for the above hasn't been released as of Emacs 25.2."
 
 (require-package 'sqlformat)
 (with-eval-after-load 'sql
+  (setq sqlformat-command 'pgformatter)
   (define-key sql-mode-map (kbd "C-c C-f") 'sqlformat))
 
 ;; Package ideas:

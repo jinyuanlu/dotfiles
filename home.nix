@@ -18,6 +18,7 @@
     # dev tools
     shellcheck
     nixfmt
+    pgformatter
   ];
 
   # This value determines the Home Manager release that your
