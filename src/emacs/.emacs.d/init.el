@@ -103,6 +103,7 @@
 (require 'init-purescript)
 (require 'init-ruby)
 (require 'init-rails)
+(require 'init-scala)
 (require 'init-sql)
 (require 'init-ocaml)
 (require 'init-j)
