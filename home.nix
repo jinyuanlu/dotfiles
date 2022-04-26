@@ -9,6 +9,7 @@
   home.packages = with pkgs; [
     ripgrep
     stack
+    ledger
     # count disk
     du-dust
     # count code
