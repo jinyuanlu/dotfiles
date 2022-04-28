@@ -268,7 +268,7 @@ typical word processor."
 
 
 ;;; Org clock
-
+(setq org-clock-persist-file (concat org-directory "org-clock-save.el" ))
 ;; Save the running clock and all clock history when exiting Emacs, load it on startup
 (with-eval-after-load 'org
   (org-clock-persistence-insinuate))
