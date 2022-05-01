@@ -52,6 +52,7 @@
       org-tags-column 80
       org-agenda-files (directory-files-recursively "~/.org/" "\\.org$")
       org-directory "~/.org/"
+      org-default-notes-file (concat org-directory "refile.org")
       )
 
 
