@@ -35,7 +35,6 @@
 
 
 (setq custom-file (locate-user-emacs-file "~/.emacs.d/custom.el"))
-(load custom-file)
 
 (require 'init-utils)
 (require 'init-site-lisp) ;; Must come before elpa, as it may provide package.el
