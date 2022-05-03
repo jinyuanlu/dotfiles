@@ -20,6 +20,8 @@
     shellcheck
     nixfmt
     pgformatter
+    # font
+    source-code-pro
   ];
 
   # This value determines the Home Manager release that your
