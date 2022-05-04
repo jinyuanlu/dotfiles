@@ -1,4 +1,4 @@
-{ config, pkgs, ... }:
+{ config, lib, pkgs, ... }:
 
 {
   # Home Manager needs a bit of information about you and the
@@ -23,6 +23,12 @@
     # font
     source-code-pro
   ];
+
+  home.activation = {
+    aliasApplications = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      ln -sfn $genProfilePath/home-path/Applications "$HOME/Applications/Home Manager Applications"
+    '';
+  };
 
   # This value determines the Home Manager release that your
   # configuration is compatible with. This helps avoid breakage
