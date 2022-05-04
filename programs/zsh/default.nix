@@ -22,6 +22,8 @@
         "curl 'https://min-api.cryptocompare.com/data/price?fsym=ETH&tsyms=BTC,USD,CNY' | python -m json.tool";
       btc =
         "curl 'https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=BTC,USD,CNY' | python -m json.tool";
+      # get finder current directory
+      fcd = ''osascript -e "tell app \"Finder\" to POSIX path of (insertion location as alias)"'';
     };
 
     initExtra = builtins.readFile ./zshrc;
