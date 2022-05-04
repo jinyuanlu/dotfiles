@@ -11,27 +11,23 @@ end
 -- app to expected ime config
 local app2Ime = {
     {'/Applications/iTerm.app', 'English'},
-    {'/usr/local/Cellar/emacs-mac/emacs-27.1-mac-8.1/Emacs.app', 'English'},
     {'/Applications/Xcode.app', 'English'},
     {'/Applications/Google Chrome.app', 'Chinese'},
     {'/System/Library/CoreServices/Finder.app', 'English'},
     {'/Applications/DingTalk.app', 'Chinese'},
-    {'/Applications/Kindle.app', 'English'},
-    {'/Applications/NeteaseMusic.app', 'Chinese'},
     {'/Applications/System Preferences.app', 'English'},
     {'/Applications/Dash.app', 'English'},
-    {'/Applications/Preview.app', 'Chinese'},
-    {'/Applications/wechatwebdevtools.app', 'English'},
-    {'/Applications/Sketch.app', 'English'},
+    {'Emacs.app', 'English'},
 }
 
 function updateFocusAppInputMethod()
     local focusAppPath = hs.window.frontmostWindow():application():path()
+    print(focusAppPath)
     for index, app in pairs(app2Ime) do
         local appPath = app[1]
         local expectedIme = app[2]
 
-        if focusAppPath == appPath then
+        if focusAppPath == appPath or string.find(focusAppPath, appPath) then
             if expectedIme == 'English' then
                 English()
             else
