@@ -11,8 +11,9 @@
 (when (maybe-require-package 'eglot)
   (maybe-require-package 'consult-eglot))
 
-
-
+(with-eval-after-load "eglot"
+  (add-to-list 'eglot-server-programs '(python-mode . ("pyright")))
+  )
 
 (provide 'init-eglot)
 ;;; init-eglot.el ends here

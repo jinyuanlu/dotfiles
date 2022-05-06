@@ -1,5 +1,5 @@
 { pkgs, ... }: {
-  home.packages = [ pkgs.direnv pkgs.fzf pkgs.starship pkgs.zoxide ];
+  home.packages = [ pkgs.fzf pkgs.starship pkgs.zoxide ];
 
   programs.zsh = {
     enable = true;

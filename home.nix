@@ -10,6 +10,7 @@
     ripgrep
     stack
     ledger
+    direnv
     # count disk
     du-dust
     # count code
@@ -22,6 +23,8 @@
     pgformatter
     # font
     source-code-pro
+    # lsp
+    pyright
   ];
 
   home.activation = {
