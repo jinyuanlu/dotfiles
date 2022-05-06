@@ -25,6 +25,7 @@
     source-code-pro
     # lsp
     pyright
+    ccls
   ];
 
   home.activation = {
