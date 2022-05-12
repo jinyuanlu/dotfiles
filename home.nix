@@ -18,6 +18,7 @@
     # faster find
     fd
     # dev tools
+    bazel_5
     shellcheck
     nixfmt
     pgformatter
