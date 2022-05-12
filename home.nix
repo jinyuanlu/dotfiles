@@ -19,6 +19,7 @@
     fd
     # dev tools
     bazel_5
+    terraform
     shellcheck
     nixfmt
     pgformatter
