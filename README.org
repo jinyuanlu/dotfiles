@@ -1,9 +1,19 @@
 * dotfiles
 
-** Usage
+** Usage: Nix-part
    Install [[https://nixos.org/][nix]] and [[https://github.com/nix-community/home-manager][home-manager]] then install . You should be able to run the home-manager program in a shell.
    #+begin_src shell
      # or: ln -s dotfiles/* ~/.config/nixpkgs
      git clone https://github.com/jinyuanlu/dotfiles.git ~/.config/nixpkgs
      home-manager switch
    #+end_src
+
+** Usage: Rime
+
+There is no nix-integrated rime out there. So We just still use `brew` to maintain input method.
+
+See `src/rime/install.sh`
+
+** Usage: Hammerspoon
+
+See `src/hammerspoon/install.sh`.
