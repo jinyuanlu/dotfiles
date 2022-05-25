@@ -82,6 +82,7 @@
 
 (require 'init-projectile)
 
+(require 'init-bazel)
 (require 'init-compile)
 (require 'init-coq)
 (require 'init-crontab)
