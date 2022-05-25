@@ -83,6 +83,7 @@
 (require 'init-projectile)
 
 (require 'init-compile)
+(require 'init-coq)
 (require 'init-crontab)
 (require 'init-textile)
 (require 'init-markdown)

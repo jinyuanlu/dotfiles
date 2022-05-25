@@ -18,6 +18,7 @@
     # faster find
     fd
     # dev tools
+    coq
     bazel_5
     terraform
     shellcheck
@@ -28,6 +29,7 @@
     # lsp
     pyright
     ccls
+
   ];
 
   home.activation = {
