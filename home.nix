@@ -29,6 +29,8 @@
     # lsp
     pyright
     ccls
+    # cloud
+    awscli
 
   ];
 
