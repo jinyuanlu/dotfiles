@@ -24,6 +24,7 @@
     shellcheck
     nixfmt
     pgformatter
+    pre-commit
     # font
     source-code-pro
     # lsp
