@@ -25,6 +25,7 @@
     nixfmt
     pgformatter
     pre-commit
+    git-filter-repo
     # font
     source-code-pro
     # lsp
