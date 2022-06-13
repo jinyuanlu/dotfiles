@@ -64,11 +64,4 @@
     ignores = [ ".DS_Store" "*.pyc" ];
   };
 
-  programs.mpv = {
-    enable = true;
-    config = {
-      hwdec = "auto";
-    };
-  };
-
 }
