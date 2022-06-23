@@ -33,6 +33,8 @@
     ccls
     # cloud
     awscli
+    # misc
+    youtube-dl
 
   ];
 
