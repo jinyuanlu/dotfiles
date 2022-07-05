@@ -8,6 +8,16 @@
      home-manager switch
    #+end_src
 
+  *Note*:
+  If nix-* command missing after macOS upgrade, add below to $/etc/zshrc$
+#+begin_src shell
+  # Nix
+  if [ -e '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh' ]; then
+    . '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh'
+  fi
+  # End Nix
+#+end_src
+
 ** Usage: Rime
 
 There is no nix-integrated rime out there. So We just still use `brew` to maintain input method.
