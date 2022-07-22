@@ -3,8 +3,8 @@
 {
   # Home Manager needs a bit of information about you and the
   # paths it should manage.
-  home.username = "lujinyuan";
-  home.homeDirectory = "/Users/lujinyuan";
+  home.username = "admin";
+  home.homeDirectory = "/Users/admin";
 
   home.packages = with pkgs; [
     ripgrep
