@@ -32,7 +32,7 @@
     pyright
     ccls
     # cloud
-    awscli
+    awscli2
 
   ];
 
