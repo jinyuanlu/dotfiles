@@ -60,6 +60,7 @@
   programs.git = {
     enable = true;
     userName = "Jinyuan Lu";
+    # Need to override on work machine
     userEmail = "me@jinyuanlu.net";
     ignores = [ ".DS_Store" "*.pyc" ];
   };
