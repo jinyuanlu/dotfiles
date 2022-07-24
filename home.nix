@@ -7,6 +7,7 @@
   home.homeDirectory = "/Users/lujinyuan";
 
   home.packages = with pkgs; [
+    tree
     ripgrep
     stack
     ledger
@@ -23,7 +24,6 @@
     jdk8
     coursier
     # -- For: metals-emacs
-
     coq
     bazel_5
     terraform
