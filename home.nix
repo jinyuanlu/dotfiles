@@ -67,7 +67,7 @@
     enable = true;
     userName = "Jinyuan Lu";
     # Need to override on work machine
-    userEmail = "me@jinyuanlu.net";
+    userEmail = "lu.j@ctw.inc";
     ignores = [ ".DS_Store" "*.pyc" ];
   };
 
