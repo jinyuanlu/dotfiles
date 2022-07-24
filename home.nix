@@ -18,6 +18,12 @@
     # faster find
     fd
     # dev tools
+
+    # -- For: metals-emacs
+    jdk8
+    coursier
+    # -- For: metals-emacs
+
     coq
     bazel_5
     terraform
