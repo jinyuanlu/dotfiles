@@ -38,6 +38,7 @@
     pyright
     ccls
     # cloud
+    kind
     awscli2
 
   ];
