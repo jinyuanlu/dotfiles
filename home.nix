@@ -7,6 +7,7 @@
   home.homeDirectory = "/Users/admin";
 
   home.packages = with pkgs; [
+    gnupg
     tree
     ripgrep
     stack
