@@ -8,6 +8,7 @@
 
   home.packages = with pkgs; [
     jq
+    graphviz
     gnupg
     tree
     ripgrep
