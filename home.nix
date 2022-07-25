@@ -7,6 +7,7 @@
   home.homeDirectory = "/Users/lujinyuan";
 
   home.packages = with pkgs; [
+    gnupg
     tree
     ripgrep
     stack
