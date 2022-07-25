@@ -27,6 +27,7 @@
     jdk8
     coursier
     # -- For: metals-emacs
+    sbt
     coq
     bazel_5
     terraform
