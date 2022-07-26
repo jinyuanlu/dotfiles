@@ -28,6 +28,7 @@
     coursier
     # -- For: metals-emacs
     sbt
+    scala_2_12
     coq
     bazel_5
     terraform
