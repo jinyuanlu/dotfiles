@@ -44,6 +44,7 @@
     ccls
     # cloud
     kind
+    kustomize
     awscli2
 
   ];
