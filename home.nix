@@ -30,6 +30,7 @@
     sbt
     scala_2_12
     nodejs
+    yarn
     coq
     bazel_5
     terraform
