@@ -8,9 +8,6 @@
 
   home.packages = with pkgs; [
     jq
-    # -- image tool
-    imagemagick
-    freetype
     graphviz
     gnupg
     tree
