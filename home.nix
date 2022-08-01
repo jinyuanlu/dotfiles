@@ -22,7 +22,6 @@
     # faster find
     fd
     # dev tools
-
     # -- For: metals-emacs
     jdk8
     coursier
@@ -31,6 +30,8 @@
     scala_2_12
     nodejs
     yarn
+    rustc
+    cargo
     coq
     bazel_5
     terraform
