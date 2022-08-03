@@ -45,6 +45,7 @@
     # lsp
     pyright
     ccls
+    nodePackages.typescript-language-server
     # cloud
     kind
     kustomize
