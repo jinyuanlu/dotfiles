@@ -27,6 +27,7 @@
     jdk8
     coursier
     # -- For: metals-emacs
+    maven
     sbt
     scala_2_12
     nodejs
