@@ -25,6 +25,7 @@
     # dev tools
     # -- For: metals-emacs
     jdk8
+    jdk11
     coursier
     # -- For: metals-emacs
     maven
