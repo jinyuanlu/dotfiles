@@ -24,8 +24,6 @@
     fd
     # dev tools
     # -- For: metals-emacs
-    jdk8
-    jdk11
     coursier
     # -- For: metals-emacs
     maven
@@ -76,6 +74,12 @@
 
   # Let Home Manager install and manage itself.
   programs.home-manager.enable = true;
+
+  programs.java = {
+    enable = true;
+    package = pkgs.jdk11;
+  };
+
 
   programs.git = {
     enable = true;
