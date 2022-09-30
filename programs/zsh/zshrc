@@ -9,6 +9,11 @@ eval "$(starship init zsh)"
 eval "$(zoxide init zsh)"
 
 # ===============================
+# direnv
+# ===============================
+eval "$(direnv hook zsh)"
+
+# ===============================
 # History
 # ===============================
 # Share history file amongst all Zsh sessions, ignoring dupes
