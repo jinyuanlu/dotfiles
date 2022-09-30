@@ -92,6 +92,7 @@
 (require 'init-erlang)
 (require 'init-javascript)
 (require 'init-php)
+(require 'init-go)
 (require 'init-org)
 (require 'init-nxml)
 (require 'init-html)
@@ -115,6 +116,7 @@
 (require 'init-docker)
 (require 'init-terraform)
 (require 'init-nix)
+(require 'init-yasnippet)
 (maybe-require-package 'nginx-mode)
 
 (require 'init-paredit)
