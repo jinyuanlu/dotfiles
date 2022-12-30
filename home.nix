@@ -22,6 +22,8 @@
     tokei
     # faster find
     fd
+    # find & replace
+    sd
     # dev tools
     # -- For: metals-emacs
     coursier
