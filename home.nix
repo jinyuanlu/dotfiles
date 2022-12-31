@@ -16,6 +16,7 @@
     stack
     ledger
     direnv
+    kdash
     # count disk
     du-dust
     # count code
