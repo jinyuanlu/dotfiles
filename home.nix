@@ -32,6 +32,8 @@
     maven
     sbt
     scala_2_12
+    # Run arbitrary commands when files change
+    entr
     nodejs
     yarn
     rustc
