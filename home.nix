@@ -17,6 +17,7 @@
     ledger
     direnv
     kdash
+    shfmt
     # count disk
     du-dust
     # count code
