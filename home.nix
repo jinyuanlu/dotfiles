@@ -34,6 +34,7 @@
     scala_2_12
     # Run arbitrary commands when files change
     entr
+    elmPackages.elm
     nodejs
     yarn
     rustc
