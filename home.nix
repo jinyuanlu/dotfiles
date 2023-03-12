@@ -36,6 +36,9 @@
     entr
     elmPackages.elm
     nodejs
+    elmPackages.elm
+    nodePackages.http-server
+    xsv
     yarn
     rustc
     cargo
