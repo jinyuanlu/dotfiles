@@ -36,6 +36,9 @@
     # Run arbitrary commands when files change
     entr
     nodejs
+    elmPackages.elm
+    nodePackages.http-server
+    xsv
     yarn
     rustc
     cargo
