@@ -18,10 +18,8 @@
       ee = "emacsclient";
       formatnix = "fd -e nix -X nixfmt";
       ls = "ls -G";
-      eth =
-        "curl 'https://min-api.cryptocompare.com/data/price?fsym=ETH&tsyms=BTC,USD,CNY' | python -m json.tool";
-      btc =
-        "curl 'https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=BTC,USD,CNY' | python -m json.tool";
+      eth = "curl 'https://min-api.cryptocompare.com/data/price?fsym=ETH&tsyms=BTC,USD,CNY' | jq";
+      btc = "curl 'https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=BTC,USD,CNY' | jq";
       # get finder current directory
       fcd = ''osascript -e "tell app \"Finder\" to POSIX path of (insertion location as alias)"'';
       ts="echo -e \"\$(TZ=\"America/New_York\" date) - New York\n\$(TZ=\"Europe/London\" date) - London\n\$(TZ=\"Asia/Tokyo\" date) - Tokyo\n\$(TZ=\"Asia/Shanghai\" date) - Beijing\"";
