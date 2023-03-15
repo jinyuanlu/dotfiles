@@ -45,4 +45,3 @@ export PKG_CONFIG_PATH="/opt/homebrew/opt/imagemagick@6/lib/pkgconfig"
 export LDFLAGS="-L/opt/homebrew/opt/imagemagick@6/lib"
 export CPPFLAGS="-I/opt/homebrew/opt/imagemagick@6/include"
 export PATH="$(npm config get prefix)/bin:$PATH"
-alias ts='echo -e "$(TZ="America/New_York" date) - New York\n$(TZ="Europe/London" date) - London\n$(TZ="Asia/Tokyo" date) - Tokyo\n$(TZ="Asia/Shanghai" date) - Beijing"'
