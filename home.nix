@@ -18,6 +18,7 @@
     direnv
     kdash
     shfmt
+    colordiff
     # count disk
     du-dust
     # count code
