@@ -25,6 +25,8 @@
       ts="echo -e \"\$(TZ=\"America/New_York\" date) - New York\n\$(TZ=\"Europe/London\" date) - London\n\$(TZ=\"Asia/Tokyo\" date) - Tokyo\n\$(TZ=\"Asia/Shanghai\" date) - Beijing\"";
       au="aws-sso-util";
       cdf="colordiff -u";
+      kc="kubectx";
+      k="kubectl";
     };
 
     initExtra = builtins.readFile ./zshrc;
