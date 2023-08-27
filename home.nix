@@ -3,8 +3,8 @@
 {
   # Home Manager needs a bit of information about you and the
   # paths it should manage.
-  home.username = "lujinyuan";
-  home.homeDirectory = "/Users/lujinyuan";
+  home.username = "jinyuanlu";
+  home.homeDirectory = "/Users/jinyuanlu";
 
   home.packages = with pkgs; [
     tmux
@@ -29,6 +29,9 @@
     # -- For: metals-emacs
     coursier
     # -- For: metals-emacs
+    skaffold
+    kubectl
+    minikube
     maven
     sbt
     scala_2_12
