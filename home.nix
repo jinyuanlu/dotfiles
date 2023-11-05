@@ -44,6 +44,7 @@
     xsv
     yarn
     rustc
+    rustup
     cargo
     coq
     bazel_5
