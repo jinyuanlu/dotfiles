@@ -24,6 +24,7 @@
       fcd = ''osascript -e "tell app \"Finder\" to POSIX path of (insertion location as alias)"'';
       ts="echo -e \"\$(TZ=\"America/New_York\" date) - New York\n\$(TZ=\"Europe/London\" date) - London\n\$(TZ=\"Asia/Tokyo\" date) - Tokyo\n\$(TZ=\"Asia/Shanghai\" date) - Beijing\"";
       myip="dig -4 TXT +short o-o.myaddr.l.google.com @ns1.google.com";
+      k="kubectl";
     };
 
     initExtra = builtins.readFile ./zshrc;
