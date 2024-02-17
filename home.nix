@@ -44,7 +44,6 @@
     xsv
     yarn
     rustc
-    rustup
     cargo
     coq
     bazel_5
@@ -81,7 +80,7 @@
   # You can update Home Manager without changing this value. See
   # the Home Manager release notes for a list of state version
   # changes in each release.xf
-  home.stateVersion = "21.11";
+  home.stateVersion = "23.05";
 
   imports = [ ./programs/emacs/emacs.nix ./programs/zsh/default.nix ];
 
