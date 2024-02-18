@@ -27,6 +27,7 @@
       k="kubectl";
       n="nomad";
       rand6="openssl rand -hex 3";
+      j="just";
     };
 
     initExtra = builtins.readFile ./zshrc;
