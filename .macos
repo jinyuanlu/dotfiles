@@ -8,6 +8,13 @@ sudo nvram SystemAudioVolume=" "
 defaults write NSGlobalDomain KeyRepeat -int 1
 defaults write NSGlobalDomain InitialKeyRepeat -int 10
 
+
+###############################################################################
+# Finder                                                                      #
+###############################################################################
+# Show all files
+defaults write com.apple.finder AppleShowAllFiles -bool YES
+
 # Finder: show all filename extensions
 defaults write NSGlobalDomain AppleShowAllExtensions -bool true
 
