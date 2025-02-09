@@ -1,5 +1,9 @@
 #!bin/bash
 # reference: https://github.com/bjartek/dotfiles/blob/7caf1c497df11687077a4dbf95525a6d64a69335/.macos#L4
+
+# Disable the sound effects on boot
+sudo nvram SystemAudioVolume=" "
+
 # Set a blazingly fast keyboard repeat rate
 defaults write NSGlobalDomain KeyRepeat -int 1
 defaults write NSGlobalDomain InitialKeyRepeat -int 10
