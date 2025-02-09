@@ -6,3 +6,6 @@ defaults write NSGlobalDomain InitialKeyRepeat -int 10
 
 # Finder: show all filename extensions
 defaults write NSGlobalDomain AppleShowAllExtensions -bool true
+
+# When performing a search, search the current folder by default
+defaults write com.apple.finder FXDefaultSearchScope -string "SCcf"
