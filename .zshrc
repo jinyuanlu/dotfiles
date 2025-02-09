@@ -133,11 +133,23 @@ compinit
 # Smarter cd command
 eval "$(zoxide init zsh)"
 
-# Things shared between bash and zsh that should come after.
-# This includes almost all exports and aliases.
-if [ -f "$HOME/.bash_after" ]; then
-  source "$HOME/.bash_after"
-fi
+# ===============================
+# History
+# ===============================
+# Share history file amongst all Zsh sessions, ignoring dupes
+setopt append_history share_history histignorealldups
+# See: https://unix.stackexchange.com/a/484527/45689
+# FIXME: we need the prezto CTRL+R menu...
+history-incremental-pattern-search-backward-from-line () {
+  zle history-incremental-pattern-search-backward $BUFFER
+}
+zle -N history-incremental-pattern-search-backward-from-line
+bindkey -M viins "^R" history-incremental-pattern-search-backward-from-line
+bindkey -M vicmd "^R" history-incremental-pattern-search-backward-from-line
+bindkey -M isearch "^R" history-incremental-pattern-search-backward
 
+# ===============================
+# prompt
+# ===============================
 # Last thing of this file, starship
 eval "$(starship init zsh)"
