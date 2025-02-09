@@ -106,11 +106,6 @@ export plugins=(
   safe-paste # TODO: test it
   web-search
   zbell
-
-  # Managed by me below
-  zsh-autosuggestions
-  # zsh-completions  # zsh-users/zsh-completions#603
-  zsh-syntax-highlighting
 )
 
 
