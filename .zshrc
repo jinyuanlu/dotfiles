@@ -116,8 +116,6 @@ export plugins=(
 )
 
 
-source "$ZSH/oh-my-zsh.sh"
-
 # Proper autocompletions
 autoload -Uz compinit
 compinit
@@ -140,10 +138,6 @@ eval "$(zoxide init zsh)"
 if [ -f "$HOME/.bash_after" ]; then
   source "$HOME/.bash_after"
 fi
-
-# fzf setup
-source /usr/share/doc/fzf/examples/key-bindings.zsh
-source /usr/share/doc/fzf/examples/completion.zsh
 
 # Last thing of this file, starship
 eval "$(starship init zsh)"
