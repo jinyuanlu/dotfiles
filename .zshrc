@@ -143,7 +143,10 @@ zle -N history-incremental-pattern-search-backward-from-line
 bindkey -M viins "^R" history-incremental-pattern-search-backward-from-line
 bindkey -M vicmd "^R" history-incremental-pattern-search-backward-from-line
 bindkey -M isearch "^R" history-incremental-pattern-search-backward
-
+# ===============================
+# fzf
+# ===============================
+source <(fzf --zsh)
 # ===============================
 # prompt
 # ===============================
