@@ -1,4 +1,3 @@
-cask "emacs"
 brew 'fd'
 brew 'ripgrep'
 brew 'fzf'
