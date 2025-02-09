@@ -1,0 +1,7 @@
+#!/bin/bash
+
+echo "Installing homebrew"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install.sh)"
+brew install yadm
+
+yadm clone https://github.com/jinyuanlu/dotfiles.git
