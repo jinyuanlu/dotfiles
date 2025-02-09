@@ -1,10 +1,6 @@
 #!/bin/zsh
 
-# Things shared between bash and zsh that should come before.
-# This includes changes to $PATH.
-if [ -f "$HOME/.bash_before" ]; then
-  source "$HOME/.bash_before"
-fi
+source "$HOME/.history.sh"
 
 # Path to your oh-my-zsh installation.
 export ZSH="$HOME/.oh-my-zsh"
