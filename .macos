@@ -5,7 +5,7 @@
 sudo nvram SystemAudioVolume=" "
 
 # Set a blazingly fast keyboard repeat rate
-defaults write NSGlobalDomain KeyRepeat -int 3
+defaults write NSGlobalDomain KeyRepeat -int 6
 defaults write NSGlobalDomain InitialKeyRepeat -int 10
 
 
