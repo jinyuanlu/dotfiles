@@ -3,6 +3,7 @@ brew 'terraform'
 tap "d12frosted/emacs-plus"
 brew "emacs-plus"
 brew "tmux"
+brew "node"
 
 # utils
 brew 'fd'
