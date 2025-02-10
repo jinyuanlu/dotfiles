@@ -6,6 +6,7 @@ brew "tmux"
 
 # utils
 brew 'fd'
+brew 'kubectx'
 brew 'ripgrep'
 brew 'fzf'
 brew 'autoconf'
