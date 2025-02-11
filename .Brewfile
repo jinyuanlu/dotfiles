@@ -4,6 +4,7 @@ tap "d12frosted/emacs-plus"
 brew "emacs-plus"
 brew "tmux"
 brew "node"
+brew "direnv"
 
 # utils
 brew 'fd'
