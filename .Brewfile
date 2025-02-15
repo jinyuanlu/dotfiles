@@ -5,6 +5,7 @@ brew "emacs-plus"
 brew "tmux"
 brew "node"
 brew "direnv"
+brew "pnpm"
 
 # utils
 brew 'fd'
