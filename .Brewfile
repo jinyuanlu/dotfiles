@@ -6,7 +6,6 @@ brew "tmux"
 brew "node"
 brew "direnv"
 brew "pnpm"
-brew "aider"
 
 # utils
 brew 'fd'
