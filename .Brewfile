@@ -7,6 +7,7 @@ brew "node"
 brew "direnv"
 brew "pnpm"
 brew "lua"
+brew "uv"
 
 
 # utils
