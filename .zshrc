@@ -3,6 +3,7 @@
 source "$HOME/.history.sh"
 source "$HOME/.aliases.sh"
 source "$HOME/.mandatory_aliases.sh"
+source "$HOME/.app_env.sh"
 
 # Path to your oh-my-zsh installation.
 export ZSH="$HOME/.oh-my-zsh"
