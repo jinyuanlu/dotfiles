@@ -1,5 +1,6 @@
 # Apps
 brew 'terraform'
+brew 'nvm'
 tap "d12frosted/emacs-plus"
 brew "emacs-plus"
 brew "tmux"
