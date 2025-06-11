@@ -21,3 +21,4 @@ brew 'tree'
 brew 'zsh'
 brew 'zoxide'
 brew 'starship'
+brew "act" # run github action locally
