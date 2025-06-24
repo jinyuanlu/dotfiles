@@ -19,3 +19,5 @@ Example formats:
 - `chore(deps): bump lodash to 4.17.21`
 
 Generate the most appropriate commit message based on the changes and commit automatically.
+
+Don't include `claude` related info.
