@@ -1,7 +1,16 @@
 #!/bin/bash
 
-# Path to the MCP configuration file
-MCP_CONFIG="/Users/jinyuanlu/Code/dotfiles/.claude/mcp.json"
+# Path to the MCP configuration file (using yadm to locate dotfiles)
+MCP_CONFIG="$(yadm list | grep '\.claude/mcp\.json$' | head -1)"
+if [ -z "$MCP_CONFIG" ]; then
+    # Fallback: try common yadm dotfiles locations
+    for base in "$HOME/.dotfiles" "$HOME/dotfiles" "$HOME/.config/yadm/dotfiles"; do
+        if [ -f "$base/.claude/mcp.json" ]; then
+            MCP_CONFIG="$base/.claude/mcp.json"
+            break
+        fi
+    done
+fi
 
 # Check if the file exists
 if [ ! -f "$MCP_CONFIG" ]; then
@@ -21,5 +30,4 @@ jq -r '.mcpServers | to_entries[] | @base64' "$MCP_CONFIG" | while read -r entry
     echo "Adding MCP server: $name"
     claude mcp add-json -s user "$name" "$config"
 done
-
 echo "MCP server sync complete!"
