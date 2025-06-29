@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# Path to the MCP configuration file
+MCP_CONFIG="/Users/jinyuanlu/Code/dotfiles/.claude/mcp.json"
+
+# Check if the file exists
+if [ ! -f "$MCP_CONFIG" ]; then
+    echo "Error: MCP config file not found at $MCP_CONFIG"
+    exit 1
+fi
+
+# Read and add each MCP server from the JSON file
+echo "Syncing MCP servers from $MCP_CONFIG..."
+
+# Extract server names and configurations
+jq -r '.mcpServers | to_entries[] | @base64' "$MCP_CONFIG" | while read -r entry; do
+    # Decode the entry
+    name=$(echo "$entry" | base64 -d | jq -r '.key')
+    config=$(echo "$entry" | base64 -d | jq -c '.value')
+    
+    echo "Adding MCP server: $name"
+    claude mcp add-json -s user "$name" "$config"
+done
+
+echo "MCP server sync complete!"
