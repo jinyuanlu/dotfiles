@@ -1,16 +1,19 @@
 #!/bin/bash
 
-# Path to the MCP configuration file (using yadm to locate dotfiles)
-MCP_CONFIG="$(yadm list | grep '\.claude/mcp\.json$' | head -1)"
-if [ -z "$MCP_CONFIG" ]; then
-    # Fallback: try common yadm dotfiles locations
-    for base in "$HOME/.dotfiles" "$HOME/dotfiles" "$HOME/.config/yadm/dotfiles"; do
-        if [ -f "$base/.claude/mcp.json" ]; then
-            MCP_CONFIG="$base/.claude/mcp.json"
-            break
-        fi
-    done
-fi
+# Path to the MCP configuration file
+# Try to find mcp.json in common locations
+MCP_CONFIG=""
+for path in \
+    "$(dirname "$0")/mcp.json" \
+    "$HOME/.claude/mcp.json" \
+    "$HOME/Code/dotfiles/.claude/mcp.json" \
+    "$HOME/.dotfiles/.claude/mcp.json" \
+    "$HOME/dotfiles/.claude/mcp.json"; do
+    if [ -f "$path" ]; then
+        MCP_CONFIG="$path"
+        break
+    fi
+done
 
 # Check if the file exists
 if [ ! -f "$MCP_CONFIG" ]; then
