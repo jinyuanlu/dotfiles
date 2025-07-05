@@ -146,6 +146,10 @@ bindkey -M isearch "^R" history-incremental-pattern-search-backward
 # ===============================
 source <(fzf --zsh)
 # ===============================
+# direnv
+# ===============================
+eval "$(direnv hook zsh)"
+# ===============================
 # prompt
 # ===============================
 # Last thing of this file, starship
