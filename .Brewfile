@@ -26,3 +26,4 @@ brew "flyctl" # fly.io
 brew "hurl"
 cask "karabiner-elements"
 cask "keycastr"
+cask "rectangle"
