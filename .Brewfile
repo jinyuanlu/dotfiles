@@ -25,3 +25,4 @@ brew "act" # run github action locally
 brew "flyctl" # fly.io
 brew "hurl"
 cask "karabiner-elements"
+cask "keycastr"
