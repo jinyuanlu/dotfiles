@@ -817,7 +817,7 @@
                 },
                 "to": [
                   {
-                    "shell_command": "open -g rectangle://execute-action?name=left-half"
+                    "shell_command": "open -g 'rectangle://execute-action?name=left-half'"
                   }
                 ],
                 "conditions": [
@@ -835,7 +835,7 @@
                 },
                 "to": [
                   {
-                    "shell_command": "open -g rectangle://execute-action?name=right-half"
+                    "shell_command": "open -g 'rectangle://execute-action?name=right-half'"
                   }
                 ],
                 "conditions": [
@@ -853,7 +853,7 @@
                 },
                 "to": [
                   {
-                    "shell_command": "open -g rectangle://execute-action?name=bottom-half"
+                    "shell_command": "open -g 'rectangle://execute-action?name=bottom-half'"
                   }
                 ],
                 "conditions": [
@@ -871,7 +871,7 @@
                 },
                 "to": [
                   {
-                    "shell_command": "open -g rectangle://execute-action?name=top-half"
+                    "shell_command": "open -g 'rectangle://execute-action?name=top-half'"
                   }
                 ],
                 "conditions": [
@@ -889,7 +889,7 @@
                 },
                 "to": [
                   {
-                    "shell_command": "open -g rectangle://execute-action?name=maximize"
+                    "shell_command": "open -g 'rectangle://execute-action?name=maximize'"
                   }
                 ],
                 "conditions": [
@@ -907,7 +907,7 @@
                 },
                 "to": [
                   {
-                    "shell_command": "open -g rectangle://execute-action?name=center"
+                    "shell_command": "open -g 'rectangle://execute-action?name=center'"
                   }
                 ],
                 "conditions": [
@@ -925,7 +925,7 @@
                 },
                 "to": [
                   {
-                    "shell_command": "open -g rectangle://execute-action?name=next-display"
+                    "shell_command": "open -g 'rectangle://execute-action?name=next-display'"
                   }
                 ],
                 "conditions": [
@@ -943,7 +943,7 @@
                 },
                 "to": [
                   {
-                    "shell_command": "open -g rectangle://execute-action?name=previous-display"
+                    "shell_command": "open -g 'rectangle://execute-action?name=previous-display'"
                   }
                 ],
                 "conditions": [
