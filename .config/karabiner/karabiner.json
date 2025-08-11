@@ -672,7 +672,7 @@
                 },
                 "to": [
                   {
-                    "shell_command": "open -a 'Terminal.app'"
+                    "shell_command": "open -a 'iTerm.app'"
                   }
                 ],
                 "conditions": [
@@ -722,6 +722,24 @@
               {
                 "type": "basic",
                 "from": {
+                  "key_code": "m"
+                },
+                "to": [
+                  {
+                    "shell_command": "open -a 'Proton Mail.app'"
+                  }
+                ],
+                "conditions": [
+                  {
+                    "type": "variable_if",
+                    "name": "tab_sublayer_o",
+                    "value": 1
+                  }
+                ]
+              },
+              {
+                "type": "basic",
+                "from": {
                   "key_code": "f"
                 },
                 "to": [
@@ -745,24 +763,6 @@
                 "to": [
                   {
                     "shell_command": "open -a 'Slack.app'"
-                  }
-                ],
-                "conditions": [
-                  {
-                    "type": "variable_if",
-                    "name": "tab_sublayer_o",
-                    "value": 1
-                  }
-                ]
-              },
-              {
-                "type": "basic",
-                "from": {
-                  "key_code": "v"
-                },
-                "to": [
-                  {
-                    "shell_command": "open -a 'Visual Studio Code.app'"
                   }
                 ],
                 "conditions": [
