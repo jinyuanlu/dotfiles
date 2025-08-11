@@ -276,14 +276,14 @@
             ]
           },
           {
-            "description": "Mouse cursor control with Fn + WASD",
+            "description": "Mouse cursor control with Right Shift + Fn + WASD",
             "manipulators": [
               {
                 "type": "basic",
                 "from": {
                   "key_code": "a",
                   "modifiers": {
-                    "mandatory": ["fn"]
+                    "mandatory": ["right_shift", "fn"]
                   }
                 },
                 "to": [
@@ -299,7 +299,7 @@
                 "from": {
                   "key_code": "s",
                   "modifiers": {
-                    "mandatory": ["fn"]
+                    "mandatory": ["right_shift", "fn"]
                   }
                 },
                 "to": [
@@ -315,7 +315,7 @@
                 "from": {
                   "key_code": "w",
                   "modifiers": {
-                    "mandatory": ["fn"]
+                    "mandatory": ["right_shift", "fn"]
                   }
                 },
                 "to": [
@@ -331,7 +331,7 @@
                 "from": {
                   "key_code": "d",
                   "modifiers": {
-                    "mandatory": ["fn"]
+                    "mandatory": ["right_shift", "fn"]
                   }
                 },
                 "to": [
@@ -347,7 +347,7 @@
                 "from": {
                   "key_code": "a",
                   "modifiers": {
-                    "mandatory": ["fn", "shift"]
+                    "mandatory": ["right_shift", "fn", "left_shift"]
                   }
                 },
                 "to": [
@@ -363,7 +363,7 @@
                 "from": {
                   "key_code": "s",
                   "modifiers": {
-                    "mandatory": ["fn", "shift"]
+                    "mandatory": ["right_shift", "fn", "left_shift"]
                   }
                 },
                 "to": [
@@ -379,7 +379,7 @@
                 "from": {
                   "key_code": "w",
                   "modifiers": {
-                    "mandatory": ["fn", "shift"]
+                    "mandatory": ["right_shift", "fn", "left_shift"]
                   }
                 },
                 "to": [
@@ -395,7 +395,7 @@
                 "from": {
                   "key_code": "d",
                   "modifiers": {
-                    "mandatory": ["fn", "shift"]
+                    "mandatory": ["right_shift", "fn", "left_shift"]
                   }
                 },
                 "to": [
@@ -409,14 +409,14 @@
             ]
           },
           {
-            "description": "Mouse clicks with Fn + Space/Return",
+            "description": "Mouse clicks with Right Shift + Fn + Space/Return",
             "manipulators": [
               {
                 "type": "basic",
                 "from": {
                   "key_code": "spacebar",
                   "modifiers": {
-                    "mandatory": ["fn"]
+                    "mandatory": ["right_shift", "fn"]
                   }
                 },
                 "to": [
@@ -430,7 +430,7 @@
                 "from": {
                   "key_code": "return_or_enter",
                   "modifiers": {
-                    "mandatory": ["fn"]
+                    "mandatory": ["right_shift", "fn"]
                   }
                 },
                 "to": [
@@ -444,7 +444,7 @@
                 "from": {
                   "key_code": "spacebar",
                   "modifiers": {
-                    "mandatory": ["fn", "shift"]
+                    "mandatory": ["right_shift", "fn", "left_shift"]
                   }
                 },
                 "to": [
@@ -458,7 +458,7 @@
                 "from": {
                   "key_code": "spacebar",
                   "modifiers": {
-                    "mandatory": ["fn", "control"]
+                    "mandatory": ["right_shift", "fn", "control"]
                   }
                 },
                 "to": [
