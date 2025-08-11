@@ -276,15 +276,47 @@
             ]
           },
           {
-            "description": "Mouse cursor control with Right Shift + Fn + WASD",
+            "description": "Tab as mouse modifier - Tab alone for tab, held for mouse",
             "manipulators": [
               {
                 "type": "basic",
                 "from": {
-                  "key_code": "a",
+                  "key_code": "tab",
                   "modifiers": {
-                    "mandatory": ["right_shift", "fn"]
+                    "optional": ["any"]
                   }
+                },
+                "to": [
+                  {
+                    "set_variable": {
+                      "name": "tab_as_mouse_modifier",
+                      "value": 1
+                    }
+                  }
+                ],
+                "to_after_key_up": [
+                  {
+                    "set_variable": {
+                      "name": "tab_as_mouse_modifier",
+                      "value": 0
+                    }
+                  }
+                ],
+                "to_if_alone": [
+                  {
+                    "key_code": "tab"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "description": "Mouse cursor control with Tab + WASD",
+            "manipulators": [
+              {
+                "type": "basic",
+                "from": {
+                  "key_code": "a"
                 },
                 "to": [
                   {
@@ -292,15 +324,19 @@
                       "x": -1536
                     }
                   }
+                ],
+                "conditions": [
+                  {
+                    "type": "variable_if",
+                    "name": "tab_as_mouse_modifier",
+                    "value": 1
+                  }
                 ]
               },
               {
                 "type": "basic",
                 "from": {
-                  "key_code": "s",
-                  "modifiers": {
-                    "mandatory": ["right_shift", "fn"]
-                  }
+                  "key_code": "s"
                 },
                 "to": [
                   {
@@ -308,15 +344,19 @@
                       "y": 1536
                     }
                   }
+                ],
+                "conditions": [
+                  {
+                    "type": "variable_if",
+                    "name": "tab_as_mouse_modifier",
+                    "value": 1
+                  }
                 ]
               },
               {
                 "type": "basic",
                 "from": {
-                  "key_code": "w",
-                  "modifiers": {
-                    "mandatory": ["right_shift", "fn"]
-                  }
+                  "key_code": "w"
                 },
                 "to": [
                   {
@@ -324,21 +364,32 @@
                       "y": -1536
                     }
                   }
+                ],
+                "conditions": [
+                  {
+                    "type": "variable_if",
+                    "name": "tab_as_mouse_modifier",
+                    "value": 1
+                  }
                 ]
               },
               {
                 "type": "basic",
                 "from": {
-                  "key_code": "d",
-                  "modifiers": {
-                    "mandatory": ["right_shift", "fn"]
-                  }
+                  "key_code": "d"
                 },
                 "to": [
                   {
                     "mouse_key": {
                       "x": 1536
                     }
+                  }
+                ],
+                "conditions": [
+                  {
+                    "type": "variable_if",
+                    "name": "tab_as_mouse_modifier",
+                    "value": 1
                   }
                 ]
               },
@@ -347,7 +398,7 @@
                 "from": {
                   "key_code": "a",
                   "modifiers": {
-                    "mandatory": ["right_shift", "fn", "left_shift"]
+                    "mandatory": ["shift"]
                   }
                 },
                 "to": [
@@ -356,6 +407,13 @@
                       "x": -256
                     }
                   }
+                ],
+                "conditions": [
+                  {
+                    "type": "variable_if",
+                    "name": "tab_as_mouse_modifier",
+                    "value": 1
+                  }
                 ]
               },
               {
@@ -363,7 +421,7 @@
                 "from": {
                   "key_code": "s",
                   "modifiers": {
-                    "mandatory": ["right_shift", "fn", "left_shift"]
+                    "mandatory": ["shift"]
                   }
                 },
                 "to": [
@@ -372,6 +430,13 @@
                       "y": 256
                     }
                   }
+                ],
+                "conditions": [
+                  {
+                    "type": "variable_if",
+                    "name": "tab_as_mouse_modifier",
+                    "value": 1
+                  }
                 ]
               },
               {
@@ -379,7 +444,7 @@
                 "from": {
                   "key_code": "w",
                   "modifiers": {
-                    "mandatory": ["right_shift", "fn", "left_shift"]
+                    "mandatory": ["shift"]
                   }
                 },
                 "to": [
@@ -388,6 +453,13 @@
                       "y": -256
                     }
                   }
+                ],
+                "conditions": [
+                  {
+                    "type": "variable_if",
+                    "name": "tab_as_mouse_modifier",
+                    "value": 1
+                  }
                 ]
               },
               {
@@ -395,7 +467,7 @@
                 "from": {
                   "key_code": "d",
                   "modifiers": {
-                    "mandatory": ["right_shift", "fn", "left_shift"]
+                    "mandatory": ["shift"]
                   }
                 },
                 "to": [
@@ -404,38 +476,53 @@
                       "x": 256
                     }
                   }
+                ],
+                "conditions": [
+                  {
+                    "type": "variable_if",
+                    "name": "tab_as_mouse_modifier",
+                    "value": 1
+                  }
                 ]
               }
             ]
           },
           {
-            "description": "Mouse clicks with Right Shift + Fn + Space/Return",
+            "description": "Mouse clicks with Tab + Space/Return",
             "manipulators": [
               {
                 "type": "basic",
                 "from": {
-                  "key_code": "spacebar",
-                  "modifiers": {
-                    "mandatory": ["right_shift", "fn"]
-                  }
+                  "key_code": "spacebar"
                 },
                 "to": [
                   {
                     "pointing_button": "button1"
+                  }
+                ],
+                "conditions": [
+                  {
+                    "type": "variable_if",
+                    "name": "tab_as_mouse_modifier",
+                    "value": 1
                   }
                 ]
               },
               {
                 "type": "basic",
                 "from": {
-                  "key_code": "return_or_enter",
-                  "modifiers": {
-                    "mandatory": ["right_shift", "fn"]
-                  }
+                  "key_code": "return_or_enter"
                 },
                 "to": [
                   {
                     "pointing_button": "button1"
+                  }
+                ],
+                "conditions": [
+                  {
+                    "type": "variable_if",
+                    "name": "tab_as_mouse_modifier",
+                    "value": 1
                   }
                 ]
               },
@@ -444,13 +531,20 @@
                 "from": {
                   "key_code": "spacebar",
                   "modifiers": {
-                    "mandatory": ["right_shift", "fn", "left_shift"]
+                    "mandatory": ["shift"]
                   }
                 },
                 "to": [
                   {
                     "pointing_button": "button2"
                   }
+                ],
+                "conditions": [
+                  {
+                    "type": "variable_if",
+                    "name": "tab_as_mouse_modifier",
+                    "value": 1
+                  }
                 ]
               },
               {
@@ -458,12 +552,19 @@
                 "from": {
                   "key_code": "spacebar",
                   "modifiers": {
-                    "mandatory": ["right_shift", "fn", "control"]
+                    "mandatory": ["control"]
                   }
                 },
                 "to": [
                   {
                     "pointing_button": "button3"
+                  }
+                ],
+                "conditions": [
+                  {
+                    "type": "variable_if",
+                    "name": "tab_as_mouse_modifier",
+                    "value": 1
                   }
                 ]
               }
