@@ -330,6 +330,21 @@
                     "type": "variable_if",
                     "name": "tab_as_mouse_modifier",
                     "value": 1
+                  },
+                  {
+                    "type": "variable_if",
+                    "name": "tab_sublayer_o",
+                    "value": 0
+                  },
+                  {
+                    "type": "variable_if",
+                    "name": "tab_sublayer_r",
+                    "value": 0
+                  },
+                  {
+                    "type": "variable_if",
+                    "name": "tab_sublayer_c",
+                    "value": 0
                   }
                 ]
               },
@@ -350,6 +365,21 @@
                     "type": "variable_if",
                     "name": "tab_as_mouse_modifier",
                     "value": 1
+                  },
+                  {
+                    "type": "variable_if",
+                    "name": "tab_sublayer_o",
+                    "value": 0
+                  },
+                  {
+                    "type": "variable_if",
+                    "name": "tab_sublayer_r",
+                    "value": 0
+                  },
+                  {
+                    "type": "variable_if",
+                    "name": "tab_sublayer_c",
+                    "value": 0
                   }
                 ]
               },
@@ -370,6 +400,21 @@
                     "type": "variable_if",
                     "name": "tab_as_mouse_modifier",
                     "value": 1
+                  },
+                  {
+                    "type": "variable_if",
+                    "name": "tab_sublayer_o",
+                    "value": 0
+                  },
+                  {
+                    "type": "variable_if",
+                    "name": "tab_sublayer_r",
+                    "value": 0
+                  },
+                  {
+                    "type": "variable_if",
+                    "name": "tab_sublayer_c",
+                    "value": 0
                   }
                 ]
               },
@@ -390,6 +435,21 @@
                     "type": "variable_if",
                     "name": "tab_as_mouse_modifier",
                     "value": 1
+                  },
+                  {
+                    "type": "variable_if",
+                    "name": "tab_sublayer_o",
+                    "value": 0
+                  },
+                  {
+                    "type": "variable_if",
+                    "name": "tab_sublayer_r",
+                    "value": 0
+                  },
+                  {
+                    "type": "variable_if",
+                    "name": "tab_sublayer_c",
+                    "value": 0
                   }
                 ]
               },
