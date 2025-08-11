@@ -24,3 +24,4 @@ brew 'starship'
 brew "act" # run github action locally
 brew "flyctl" # fly.io
 brew "hurl"
+brew "karabiner-elements"
