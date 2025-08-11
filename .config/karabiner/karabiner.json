@@ -576,7 +576,10 @@
               {
                 "type": "basic",
                 "from": {
-                  "key_code": "o"
+                  "key_code": "o",
+                  "modifiers": {
+                    "optional": ["any"]
+                  }
                 },
                 "to": [
                   {
@@ -599,16 +602,6 @@
                     "type": "variable_if",
                     "name": "tab_as_mouse_modifier",
                     "value": 1
-                  },
-                  {
-                    "type": "variable_if",
-                    "name": "tab_sublayer_r",
-                    "value": 0
-                  },
-                  {
-                    "type": "variable_if",
-                    "name": "tab_sublayer_c",
-                    "value": 0
                   }
                 ]
               },
@@ -728,7 +721,10 @@
               {
                 "type": "basic",
                 "from": {
-                  "key_code": "r"
+                  "key_code": "r",
+                  "modifiers": {
+                    "optional": ["any"]
+                  }
                 },
                 "to": [
                   {
@@ -751,16 +747,6 @@
                     "type": "variable_if",
                     "name": "tab_as_mouse_modifier",
                     "value": 1
-                  },
-                  {
-                    "type": "variable_if",
-                    "name": "tab_sublayer_o",
-                    "value": 0
-                  },
-                  {
-                    "type": "variable_if",
-                    "name": "tab_sublayer_c",
-                    "value": 0
                   }
                 ]
               },
@@ -916,7 +902,10 @@
               {
                 "type": "basic",
                 "from": {
-                  "key_code": "c"
+                  "key_code": "c",
+                  "modifiers": {
+                    "optional": ["any"]
+                  }
                 },
                 "to": [
                   {
@@ -939,16 +928,6 @@
                     "type": "variable_if",
                     "name": "tab_as_mouse_modifier",
                     "value": 1
-                  },
-                  {
-                    "type": "variable_if",
-                    "name": "tab_sublayer_o",
-                    "value": 0
-                  },
-                  {
-                    "type": "variable_if",
-                    "name": "tab_sublayer_r",
-                    "value": 0
                   }
                 ]
               },
