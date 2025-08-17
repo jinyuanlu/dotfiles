@@ -22,6 +22,7 @@ brew 'zsh'
 brew 'zoxide'
 brew 'starship'
 brew "act" # run github action locally
+brew "tokei"
 brew "flyctl" # fly.io
 brew "hurl"
 cask "karabiner-elements"
