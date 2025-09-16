@@ -89,7 +89,6 @@
 (require 'init-textile)
 (require 'init-markdown)
 (require 'init-csv)
-(require 'init-erlang)
 (require 'init-javascript)
 (require 'init-php)
 (require 'init-go)
@@ -122,8 +121,6 @@
 (require 'init-paredit)
 (require 'init-lisp)
 (require 'init-slime)
-(require 'init-clojure)
-(require 'init-clojure-cider)
 (require 'init-common-lisp)
 
 (when *spell-check-support-enabled*
