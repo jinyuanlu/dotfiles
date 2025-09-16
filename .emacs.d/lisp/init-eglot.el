@@ -14,6 +14,7 @@
 (with-eval-after-load "eglot"
   (add-to-list 'eglot-server-programs '(python-mode . ("pyright")))
   (add-to-list 'eglot-server-programs '((c++-mode c-mode) "ccls"))
+  (add-to-list 'eglot-server-programs '(go-mode . ("gopls")))
   )
 
 (provide 'init-eglot)
