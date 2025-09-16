@@ -9,7 +9,7 @@
       "args": ["-y", "@modelcontextprotocol/server-memory"]
     },
     "context7": {
-      "type": "stdio",
+      "type": "npx",
       "command": "npx",
       "args": ["-y", "@upstash/context7-mcp"]
     }
