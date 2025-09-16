@@ -2,6 +2,9 @@
 ;;; Commentary:
 ;;; Code:
 
+;; Install dependencies
+(require-package 'vterm)
+
 ;; Install claude-code-ide from GitHub if not already present
 (unless (package-installed-p 'claude-code-ide)
   (package-vc-install "https://github.com/manzaltu/claude-code-ide.el"))
