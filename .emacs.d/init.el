@@ -15,6 +15,13 @@
 (when (version< emacs-version "26.1")
   (message "Your Emacs is old, and some functionality in this config will be disabled. Please upgrade if possible."))
 
+;; Add this near the top of init.el, after the defconst declarations
+(defun require-package (package &optional min-version no-refresh)
+  "Install given PACKAGE, optionally requiring MIN-VERSION."
+  (unless (string= package "elein")  ; Skip elein
+    ;; ... rest of the original function
+    ))
+
 (add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
 (require 'init-benchmarking) ;; Measure startup time
 
