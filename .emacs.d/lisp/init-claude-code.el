@@ -7,7 +7,8 @@
   (package-vc-install "https://github.com/manzaltu/claude-code-ide.el"))
 
 (when (package-installed-p 'claude-code-ide)
-  (require 'claude-code-ide)
+  (with-suppressed-warnings ((bytecomp))
+    (require 'claude-code-ide))
   (global-set-key (kbd "C-c C-'") 'claude-code-ide-menu)
   (claude-code-ide-emacs-tools-setup))
 
