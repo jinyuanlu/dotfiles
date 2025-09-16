@@ -2,11 +2,14 @@
 ;;; Commentary:
 ;;; Code:
 
-(use-package claude-code-ide
-  :straight (:type git :host github :repo "manzaltu/claude-code-ide.el")
-  :bind ("C-c C-'" . claude-code-ide-menu) ; Set your favorite keybinding
-  :config
-  (claude-code-ide-emacs-tools-setup)) ; Optionally enable Emacs MCP tools
+;; Install claude-code-ide from GitHub if not already present
+(unless (package-installed-p 'claude-code-ide)
+  (package-vc-install "https://github.com/manzaltu/claude-code-ide.el"))
+
+(when (package-installed-p 'claude-code-ide)
+  (require 'claude-code-ide)
+  (global-set-key (kbd "C-c C-'") 'claude-code-ide-menu)
+  (claude-code-ide-emacs-tools-setup))
 
 (provide 'init-claude-code)
 
