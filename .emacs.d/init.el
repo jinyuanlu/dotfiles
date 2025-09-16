@@ -156,6 +156,7 @@
   (add-hook 'after-init-hook 'global-eldoc-mode))
 
 (require 'init-direnv)
+(require 'init-claude-code)
 
 
 
