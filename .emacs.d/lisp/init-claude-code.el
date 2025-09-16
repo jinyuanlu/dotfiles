@@ -12,7 +12,7 @@
 (when (package-installed-p 'claude-code-ide)
   (with-suppressed-warnings ((bytecomp))
     (require 'claude-code-ide))
-  (global-set-key (kbd "C-c C-`") 'claude-code-ide-menu)
+  (global-set-key (kbd "C-c C-'") 'claude-code-ide-menu)
   (claude-code-ide-emacs-tools-setup))
 
 (provide 'init-claude-code)
