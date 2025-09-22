@@ -9,8 +9,8 @@ brew "direnv"
 brew "pnpm"
 brew "lua"
 brew "uv"
-cast "tla+-toolbox"
-cast "alloy"
+cask "tla+-toolbox"
+cask "alloy"
 
 # utils
 brew 'fd'
