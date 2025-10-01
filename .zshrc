@@ -154,3 +154,9 @@ eval "$(direnv hook zsh)"
 # ===============================
 # Last thing of this file, starship
 eval "$(starship init zsh)"
+
+# ===============================
+# asdf
+# ===============================
+
+export PATH="${ASDF_DATA_DIR:-$HOME/.asdf}/shims:$PATH"
