@@ -15,6 +15,8 @@
   (global-set-key (kbd "C-c C-'") 'claude-code-ide-menu)
   (claude-code-ide-emacs-tools-setup))
 
+;; Note: In Claude Code vterm buffers, use C-c C-t to toggle copy mode for text selection
+
 (provide 'init-claude-code)
 
 ;;; init-claude-code.el ends here
