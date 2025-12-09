@@ -160,3 +160,9 @@ eval "$(starship init zsh)"
 # ===============================
 
 export PATH="${ASDF_DATA_DIR:-$HOME/.asdf}/shims:$PATH"
+
+# ===============================
+# Alire (Ada package manager)
+# ===============================
+
+export PATH="$HOME/alr-2.1.0-bin-universal-macos/bin:$PATH"
