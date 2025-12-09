@@ -89,6 +89,7 @@
 
 (require 'init-projectile)
 
+(require 'init-ada)
 (require 'init-bazel)
 (require 'init-compile)
 (require 'init-coq)
