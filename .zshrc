@@ -166,3 +166,4 @@ export PATH="${ASDF_DATA_DIR:-$HOME/.asdf}/shims:$PATH"
 # ===============================
 
 export PATH="$HOME/alr-2.1.0-bin-universal-macos/bin:$PATH"
+export PATH="$HOME/.alire/bin:$PATH"
