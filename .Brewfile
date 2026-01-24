@@ -26,7 +26,7 @@ brew "act" # run github action locally
 brew "tokei"
 brew "flyctl" # fly.io
 brew "hurl"
-brew "mosh"
+brew "mosh" # Termius: host > Advanced/Mosh settings > server path: /opt/homebrew/bin/mosh-server
 brew "gh"
 cask "karabiner-elements"
 cask "keycastr"
