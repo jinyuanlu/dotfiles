@@ -145,7 +145,7 @@
                 "conditions": [
                   {
                     "type": "frontmost_application_unless",
-                    "bundle_identifiers": ["^org\\.gnu\\.Emacs$", "^org\\.gnu\\.AquamacsEmacs$", "^org\\.gnu\\.Aquamacs$", "^org\\.pqrs\\.unknownapp\\.conkeror$", "^com\\.apple\\.Terminal$", "^com\\.googlecode\\.iterm2$"]
+                    "bundle_identifiers": ["^org\\.gnu\\.Emacs$", "^org\\.gnu\\.AquamacsEmacs$", "^org\\.gnu\\.Aquamacs$", "^org\\.pqrs\\.unknownapp\\.conkeror$", "^com\\.apple\\.Terminal$", "^com\\.googlecode\\.iterm2$", "^com\\.termius\\.mac$"]
                   }
                 ]
               },
