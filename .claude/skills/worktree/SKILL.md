@@ -24,11 +24,22 @@ When the user invokes this skill:
    git branch -a | grep -E "(^|\s)feat/<name>$|origin/feat/<name>"
    ```
 
-4. **Create the worktree**
-
-   **If branch does NOT exist** → create new branch from latest develop:
+4. **Determine base branch** (only needed for new branches):
    ```bash
+   git branch -r | grep -E "origin/(develop|master)$"
+   ```
+   - Use `origin/develop` if it exists
+   - Fall back to `origin/master` if `develop` doesn't exist
+
+5. **Create the worktree**
+
+   **If branch does NOT exist** → create new branch from base branch:
+   ```bash
+   # If origin/develop exists:
    git worktree add .worktrees/<name> -b feat/<name> origin/develop
+
+   # If origin/develop doesn't exist, use origin/master:
+   git worktree add .worktrees/<name> -b feat/<name> origin/master
    ```
 
    **If branch EXISTS** → use existing branch:
@@ -36,7 +47,7 @@ When the user invokes this skill:
    git worktree add .worktrees/<name> feat/<name>
    ```
 
-5. **Report the result**
+6. **Report the result**
    - Show `git worktree list`
    - Provide the worktree path: `.worktrees/<name>`
 
@@ -45,7 +56,13 @@ When the user invokes this skill:
 ```
 User: /worktree auth-refactor
 → Branch feat/auth-refactor doesn't exist
+→ origin/develop exists
 → Creates .worktrees/auth-refactor on NEW branch feat/auth-refactor (from origin/develop)
+
+User: /worktree new-feature
+→ Branch feat/new-feature doesn't exist
+→ origin/develop doesn't exist, using origin/master
+→ Creates .worktrees/new-feature on NEW branch feat/new-feature (from origin/master)
 
 User: /worktree metaknow_url_header
 → Branch feat/metaknow_url_header already exists
