@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Read(//Users/admin/.emacs.d/elpa-29.4/claude-code-ide/**)",
+      "WebSearch"
+    ],
+    "deny": []
+  }
+}
