@@ -6,7 +6,10 @@
     },
     "memory": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-memory"]
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "env": {
+        "MEMORY_FILE_PATH": "${DOTFILES_DIR}/.claude/memory/memory.json"
+      }
     },
     "context7": {
       "type": "stdio",
