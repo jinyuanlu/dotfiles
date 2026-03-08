@@ -82,6 +82,16 @@ Apply each lens to every review. Skip a lens only if genuinely irrelevant. The f
 - **Algebraic reasoning**: Can you reason about this code equationally — substituting equals for equals — or does mutation break that?
 - **Value-oriented design**: Are we thinking in transformations of immutable values, or assignments to mutable cells? (Backus)
 
+### 8. Security Posture (Saltzer & Schroeder, Kerckhoffs, Thompson)
+
+> "You can't trust code that you did not totally create yourself." — Thompson
+
+- **Complete mediation**: Is every access to every object checked, or are some paths assumed safe?
+- **Least privilege**: Does each component hold minimum authority, or is it granted more than it needs "for convenience"?
+- **Fail-safe defaults**: Does the system deny by default and permit by exception, or the reverse?
+- **Open design**: Would this be secure if the attacker read the source? If not, it's not secure. (Kerckhoffs)
+- **Trust boundaries**: Where does trusted meet untrusted? Is that boundary explicit and enforced, or implicit and hoped?
+
 ## Anti-Pattern Detection
 
 Flag immediately when spotted:

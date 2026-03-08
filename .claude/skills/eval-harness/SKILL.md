@@ -2,11 +2,20 @@
 name: eval-harness
 description: Formal evaluation framework implementing eval-driven development (EDD) for capability and regression testing.
 argument-hint: [define|check|report] [feature-name]
+tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
 # Eval Harness Skill
 
 A formal evaluation framework for Claude Code sessions, implementing eval-driven development (EDD) principles.
+
+## When to Activate
+
+- Setting up eval-driven development (EDD) for AI-assisted workflows
+- Defining pass/fail criteria for Claude Code task completion
+- Measuring agent reliability with pass@k metrics
+- Creating regression test suites for prompt or agent changes
+- Benchmarking agent performance across model versions
 
 ## Philosophy
 
@@ -71,7 +80,17 @@ Score: 1-5 (1=poor, 5=excellent)
 Reasoning: [explanation]
 ```
 
-### 3. Human Grader
+### 3. Rule-Based Grader
+Regex or schema constraints for structured outputs:
+```bash
+# Check API response shape matches schema
+ajv validate -s schema.json -d response.json && echo "PASS" || echo "FAIL"
+
+# Check naming conventions
+grep -rqP '^export function [a-z][a-zA-Z]+' src/ && echo "PASS" || echo "FAIL"
+```
+
+### 4. Human Grader
 Flag for manual review:
 ```markdown
 [HUMAN REVIEW REQUIRED]
@@ -93,6 +112,10 @@ Risk Level: LOW/MEDIUM/HIGH
 - Higher bar for reliability
 - pass^3: 3 consecutive successes
 - Use for critical paths
+
+### Recommended Thresholds
+- Capability evals: pass@3 >= 0.90
+- Regression evals: pass^3 = 1.00 for release-critical paths
 
 ## Eval Workflow
 
@@ -193,6 +216,13 @@ Store evals in project:
 5. **Human review for security** - Never fully automate security checks
 6. **Keep evals fast** - Slow evals don't get run
 7. **Version evals with code** - Evals are first-class artifacts
+
+## Anti-Patterns
+
+- Overfitting prompts to known eval examples
+- Measuring only happy-path outputs
+- Ignoring cost and latency drift while chasing pass rates
+- Allowing flaky graders in release gates
 
 ## Example: Adding Authentication
 
