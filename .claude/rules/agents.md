@@ -14,6 +14,7 @@ Located in `~/.claude/agents/`:
 | e2e-runner | E2E testing | Critical user flows |
 | refactor-cleaner | Dead code cleanup | Code maintenance |
 | doc-updater | Documentation | Updating docs |
+| challenge | Devil's advocate review | After planning, before committing to approach |
 
 ## Immediate Agent Usage
 
@@ -22,6 +23,15 @@ No user prompt needed:
 2. Code just written/modified - Use **code-reviewer** agent
 3. Bug fix or new feature - Use **tdd-guide** agent
 4. Architectural decision - Use **architect** agent
+5. Plan or design proposed - Use **challenge** agent
+
+## Agent Chaining
+
+After receiving results from these agents, automatically invoke **challenge** with those results before proceeding:
+
+- `planner` → `challenge` — Challenge the plan before implementation
+- `architect` → `challenge` — Challenge the design before committing
+- `code-reviewer` → `challenge` — Challenge non-trivial review findings
 
 ## Parallel Task Execution
 
