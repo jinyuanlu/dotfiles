@@ -3,7 +3,8 @@ name: ceo-review
 version: 1.0.0
 description: |
   CEO/founder-mode plan review. Rethink the problem, find the 10-star product,
-  challenge premises, expand scope when it creates a better product. Three modes:
+  challenge premises, expand scope when it creates a better product. Includes
+  Jobs-inspired UX review for user-facing changes. Three modes:
   SCOPE EXPANSION (dream big), HOLD SCOPE (maximum rigor), SCOPE REDUCTION
   (strip to essentials).
 allowed-tools:
@@ -347,7 +348,60 @@ Evaluate:
 * Platform potential. Does this create capabilities other features can leverage?
 **STOP.** AskUserQuestion once per issue. Do NOT batch. Recommend + WHY. If no issues or fix is obvious, state what you'll do and move on — don't waste a question. Do NOT proceed until user responds.
 
-## CRITICAL RULE — How to ask questions
+### Section 11: UX Review (The Jobs Standard)
+If the plan involves any user-facing changes (UI, CLI output, API responses, error messages, notifications), this section is mandatory. Skip only if the plan is purely backend with zero user-visible surface.
+
+> "Design is not just what it looks like and feels like. Design is how it works."
+
+Evaluate through five lenses. For each, produce specific findings with concrete recommendations.
+
+**Lens A — Simplicity & Focus:**
+- Count **concepts** on each new screen/view. More than 3-5 = too complex.
+- Apply the **kill question** to every element: "Can we remove this and nothing breaks?" If yes, remove it.
+- Can you articulate the **single core purpose** of each view in one sentence? If not, it lacks focus.
+- Check for **fake simplicity** — hiding complexity behind hamburger menus or "Advanced" sections is concealment, not simplicity.
+- Does the **visual hierarchy** match the task hierarchy? Most important action = most prominent element.
+
+**Lens B — Function & Experience:**
+- Walk the **golden path**: minimum steps to complete the primary task? Challenge every click/tap/keystroke.
+- Does the **information architecture** reflect how users think, or how the database is structured?
+- Are **implementation details** leaking? (Database IDs in URLs, technical error codes, system jargon, raw timestamps)
+- Review every error message: does it tell the user **what to do**, or what the system failed to do?
+- Are loading times mitigated through **perceived performance** (skeleton screens, optimistic updates)?
+
+**Lens C — Craft & Edge Cases:**
+- Check the **404 page, empty states, maintenance page, email templates**. Are they designed or afterthoughts?
+- Test **edge cases**: extremely long text, zero data, slow network, many items, one item. Graceful degradation?
+- Is **spacing, alignment, and typography** consistent across every screen, including secondary flows?
+- Do **micro-interactions** (button feedback, focus rings, hover states) feel intentional?
+
+**Lens D — Empathy & Accessibility:**
+- **Destructive actions** (delete, cancel) have appropriate friction? **Creative actions** (save, share) are frictionless?
+- Does the product **respect the user's time**? Flag flows where the user provides information the system already has.
+- **Accessibility**: color contrast, screen reader support, keyboard navigation, reduced motion.
+- Does the UI **acknowledge emotional context**? (Supportive tone on errors, celebration on completion)
+
+**Lens E — Coherent Story:**
+- Does the experience have a **narrative arc**? Beginning (discovery) -> middle (engagement) -> end (satisfaction).
+- **Consistent voice, tone, and visual personality** across the entire experience?
+- First 30 seconds: does it create **delight or obligation** (sign-up walls, permission requests, cookie banners)?
+
+**UX Review Rules:**
+- Every finding must include a **concrete, implementable recommendation**. No "consider" — either recommend it or don't.
+- Be specific: "The primary CTA (#6B7280 gray) has the same visual weight as cancel" is useful. "The button is wrong" is useless.
+- No generic praise ("looks clean", "nice layout"). Be specific or say nothing.
+- Do not suggest A/B tests or "user research" as substitutes for design judgment.
+
+**UX Findings Summary:**
+```
+  FINDING                        | SEVERITY       | RECOMMENDATION
+  -------------------------------|----------------|---------------------------
+  [specific finding]             | CRITICAL/WARN  | [specific fix]
+```
+Flag the **single highest-leverage UX improvement** — the one change that would transform the experience.
+**STOP.** AskUserQuestion once per issue. Do NOT batch. Recommend + WHY. If no issues or fix is obvious, state what you'll do and move on — don't waste a question. Do NOT proceed until user responds.
+
+
 Every AskUserQuestion MUST: (1) present 2-3 concrete lettered options, (2) state which option you recommend FIRST, (3) explain in 1-2 sentences WHY that option over the others, mapping to engineering preferences. No batching multiple issues into one question. No yes/no questions. Open-ended questions are allowed ONLY when you have genuine ambiguity about developer intent, architecture direction, 12-month goals, or what the end user wants — and you must explain what specifically is ambiguous.
 
 ## For Each Issue You Find
@@ -428,6 +482,7 @@ List every ASCII diagram in files this plan touches. Still accurate?
   | Section 8  (Observ)  | ___ gaps found                              |
   | Section 9  (Deploy)  | ___ risks flagged                           |
   | Section 10 (Future)  | Reversibility: _/5, debt items: ___         |
+  | Section 11 (UX)      | ___ findings, highest-leverage fix: ___      |
   +--------------------------------------------------------------------+
   | NOT in scope         | written (___ items)                          |
   | What already exists  | written                                     |
