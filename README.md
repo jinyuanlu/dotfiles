@@ -1,5 +1,140 @@
 # Dotfiles
 
+## Claude Code Setup
+
+### First-time setup
+
+```bash
+~/.claude/skills/setup        # builds browse CLI, creates ~/.gstack dirs
+```
+
+Requires [bun](https://bun.sh). The browse CLI compiles Playwright into a standalone binary at `~/.claude/skills/browse/dist/browse`.
+
+### How it works
+
+```
+                        YOU
+                         │
+              ┌──────────┴──────────┐
+              │   Slash Commands    │   /commit /review /pr /explain ...
+              │   (quick actions)   │   type in Claude Code prompt
+              └──────────┬──────────┘
+                         │
+         ┌───────────────┼───────────────┐
+         ▼               ▼               ▼
+   ┌──────────┐   ┌──────────────┐   ┌──────────┐
+   │  Skills  │   │    Agents    │   │  Rules   │
+   │ (heavy   │   │ (sub-agents  │   │ (always  │
+   │  flows)  │   │  for review) │   │  loaded) │
+   └──────────┘   └──────────────┘   └──────────┘
+```
+
+**Rules** (`.claude/rules/`) — always-on directives: coding style, architecture principles, agent orchestration. Loaded every conversation.
+
+**Commands** (`.claude/commands/`) — slash commands you type directly: `/commit`, `/review`, `/pr`, `/explain`, `/think`, `/five`, `/challenge`.
+
+**Skills** (`.claude/skills/`) — rich, multi-step workflows invoked as slash commands. Each has a `SKILL.md` with frontmatter, preamble, and detailed instructions.
+
+**Agents** (`.claude/agents/`) — specialized sub-agents spawned by the main agent for focused tasks: architecture review, security analysis, code review, etc.
+
+### Workflow: idea to ship
+
+```
+/office-hours          brainstorm, validate idea, produce design doc
+      │
+      ▼
+/plan-ceo-review       scope expansion / reduction, 10x thinking
+/plan-eng-review       architecture, tests, edge cases, failure modes
+/plan-design-review    UI/UX completeness, interaction states, AI slop
+      │
+      ▼
+  implement            write code (agents auto-fire: code-reviewer, tdd-guide)
+      │
+      ▼
+/investigate           debug with root cause discipline (scope-locked edits)
+      │
+      ▼
+/review                pre-landing diff review (SQL safety, race conditions, ...)
+/design-review         live site visual QA with headless browser
+      │
+      ▼
+/qa                    browser-based QA → fix → re-verify loop
+/qa-only               browser-based QA → report only (no fixes)
+      │
+      ▼
+/commit                conventional commit
+/pr                    create PR with summary
+```
+
+### Skills reference
+
+| Skill | Invoke | What it does |
+|-------|--------|-------------|
+| browse | `/browse` | Headless Chromium CLI (~100ms/cmd). Navigate, click, screenshot, diff pages |
+| review | `/review` | Pre-landing diff review with fix-first flow |
+| design-review | `/design-review` | Visual audit of live site → fix → re-verify |
+| plan-ceo-review | `/plan-ceo-review` | CEO/founder plan review (4 modes: expand/selective/hold/reduce) |
+| plan-eng-review | `/plan-eng-review` | Engineering plan review (architecture → tests → perf) |
+| plan-design-review | `/plan-design-review` | Designer's eye plan review (7 passes, 0-10 ratings) |
+| investigate | `/investigate` | Root cause debugging with scope-locked edits |
+| office-hours | `/office-hours` | YC-style product brainstorming → design doc |
+| design-consultation | `/design-consultation` | Create DESIGN.md (typography, color, spacing, motion) |
+| qa | `/qa` | Browser QA → fix bugs → commit each fix atomically |
+| qa-only | `/qa-only` | Browser QA → report only, no fixes |
+| eval-harness | `/eval-harness` | Eval-driven development framework |
+| market-research | `/market-research` | Competitive analysis and market sizing |
+| worktree | `/worktree` | Git worktrees for parallel feature development |
+
+### Agents reference
+
+| Agent | Spawned by | Purpose |
+|-------|-----------|---------|
+| planner | Complex feature requests | Implementation planning |
+| architect | Architectural decisions | System design analysis |
+| code-reviewer | After writing code | Quality, security, maintainability |
+| security-reviewer | Sensitive code changes | OWASP top 10, secrets, injection |
+| tdd-guide | New features, bug fixes | Test-driven development |
+| e2e-runner | Critical user flows | Playwright E2E tests |
+| challenge | After planner/architect | Devil's advocate critique |
+| refactor-cleaner | Code maintenance | Dead code removal |
+| doc-updater | After changes | Documentation sync |
+
+### Commands reference
+
+| Command | What it does |
+|---------|-------------|
+| `/commit` | Conventional commit with auto-generated message |
+| `/review` | Quick diff review (lighter than the skill) |
+| `/pr` | Create PR with structured description |
+| `/explain` | Deep explanation of code or concepts |
+| `/think` | Multi-angle structured reasoning |
+| `/five` | Five whys root cause analysis |
+| `/challenge` | Devil's advocate on current plan |
+
+### Shared utilities
+
+Scripts in `.claude/skills/bin/` used by skills internally:
+
+| Script | Purpose |
+|--------|---------|
+| `slug` | Detect `SLUG` (owner-repo) and `BRANCH` from git remote |
+| `config` | Read/write `~/.gstack/config.yaml` |
+| `review-log` | Append review result to per-project JSONL |
+| `review-read` | Read review dashboard data |
+| `diff-scope` | Categorize diff as frontend/backend/tests/docs/config |
+
+### State directories
+
+```
+~/.gstack/
+├── config.yaml              # global config (proactive, skip_eng_review, ...)
+├── projects/{slug}/         # per-repo review logs, design docs, test plans
+├── analytics/               # skill usage JSONL
+└── sessions/                # active session tracking
+```
+
+---
+
 ## Karabiner Keyboard Shortcuts Cheatsheet
 
 ### Emacs-style Navigation
