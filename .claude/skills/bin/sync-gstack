@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# sync-gstack — Pull latest gstack skills from GitHub into dotfiles
+# Rewrites gstack-specific paths to match the dotfiles layout.
+# Usage: sync-gstack [--dry-run] [--ref <branch|tag>]
+set -euo pipefail
+
+GSTACK_REPO="https://github.com/garrytan/gstack.git"
+SKILLS_DIR="${DOTFILES_DIR:-.}/.claude/skills"
+REF="main"
+DRY_RUN=false
+GSTACK_MARKER="AUTO-GENERATED from SKILL.md.tmpl"
+
+# Skills to sync (gstack dir name → dotfiles dir name)
+# Add new skills here when gstack ships them.
+SYNC_SKILLS=(
+  browse
+  careful
+  design-consultation
+  design-review
+  document-release
+  freeze
+  guard
+  investigate
+  office-hours
+  plan-ceo-review
+  plan-design-review
+  plan-eng-review
+  qa
+  qa-only
+  retro
+  review
+  setup-browser-cookies
+  ship
+  unfreeze
+)
+
+# Skills deliberately excluded:
+#   codex          — requires Codex CLI (OpenAI-specific)
+#   gstack-upgrade — gstack self-updater (not relevant outside gstack)
+
+usage() {
+  echo "Usage: sync-gstack [--dry-run] [--ref <branch|tag>]"
+  echo ""
+  echo "Options:"
+  echo "  --dry-run   Show what would change without writing files"
+  echo "  --ref REF   Git ref to sync from (default: main)"
+  echo "  --help      Show this help"
+  exit 0
+}
+
+# Rewrite gstack-specific paths in a SKILL.md to match dotfiles layout.
+# Three rules (DRY — each captures a pattern, not individual instances):
+#   1. gstack bin scripts:  skills/gstack/bin/gstack-{name} → skills/bin/{name}
+#   2. browse binary/tools: skills/gstack/browse/           → skills/browse/
+#   3. gstack-upgrade refs: skills/gstack/gstack-upgrade/   → skills/gstack-upgrade/
+rewrite_paths() {
+  local file="$1"
+  sed -i '' \
+    -e 's|skills/gstack/bin/gstack-|skills/bin/|g' \
+    -e 's|skills/gstack/browse/|skills/browse/|g' \
+    -e 's|skills/gstack/gstack-upgrade/|skills/gstack-upgrade/|g' \
+    "$file"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true; shift ;;
+    --ref) REF="$2"; shift 2 ;;
+    --help|-h) usage ;;
+    *) echo "Unknown option: $1"; usage ;;
+  esac
+done
+
+# Create a temp dir for the shallow clone (avoid shadowing system TMPDIR)
+SYNC_TMPDIR=$(mktemp -d)
+trap 'rm -rf "$SYNC_TMPDIR"' EXIT
+
+echo "Fetching gstack@${REF} ..."
+git clone --depth 1 --branch "$REF" --single-branch --quiet "$GSTACK_REPO" "$SYNC_TMPDIR/gstack"
+
+SYNCED_SHA=$(git -C "$SYNC_TMPDIR/gstack" rev-parse HEAD)
+echo "  SHA: ${SYNCED_SHA:0:12}"
+
+ADDED=0
+UPDATED=0
+UNCHANGED=0
+
+for skill in "${SYNC_SKILLS[@]}"; do
+  src="$SYNC_TMPDIR/gstack/$skill"
+  dst="$SKILLS_DIR/$skill"
+
+  if [[ ! -d "$src" ]]; then
+    echo "  SKIP  $skill (not found in gstack@${REF})"
+    continue
+  fi
+
+  if [[ ! -f "$src/SKILL.md" ]]; then
+    echo "  SKIP  $skill (no SKILL.md — run 'bun run build' in gstack first?)"
+    continue
+  fi
+
+  # Collect files to sync: SKILL.md + bin/* + supplementary *.md (e.g. checklist.md)
+  files_to_sync=("SKILL.md")
+  for f in "$src"/*.md; do
+    [[ -f "$f" ]] || continue
+    local_name=$(basename "$f")
+    [[ "$local_name" == "SKILL.md" || "$local_name" == "SKILL.md.tmpl" ]] && continue
+    files_to_sync+=("$local_name")
+  done
+  if [[ -d "$src/bin" ]]; then
+    for f in "$src/bin/"*; do
+      [[ -f "$f" ]] && files_to_sync+=("bin/$(basename "$f")")
+    done
+  fi
+
+  # Rewrite paths in temp copies of all .md files for accurate diff comparison
+  for relpath in "${files_to_sync[@]}"; do
+    if [[ "$relpath" == *.md ]]; then
+      rewritten="$SYNC_TMPDIR/rewritten-$skill-$(basename "$relpath")"
+      cp "$src/$relpath" "$rewritten"
+      rewrite_paths "$rewritten"
+    fi
+  done
+
+  changed=false
+  for relpath in "${files_to_sync[@]}"; do
+    if [[ "$relpath" == *.md ]]; then
+      src_file="$SYNC_TMPDIR/rewritten-$skill-$(basename "$relpath")"
+    else
+      src_file="$src/$relpath"
+    fi
+    dst_file="$dst/$relpath"
+
+    if [[ ! -f "$dst_file" ]]; then
+      changed=true
+      if $DRY_RUN; then
+        echo "  ADD   $skill/$relpath"
+      fi
+    elif ! diff -q "$src_file" "$dst_file" > /dev/null 2>&1; then
+      changed=true
+      if $DRY_RUN; then
+        echo "  UPD   $skill/$relpath"
+        diff -u "$dst_file" "$src_file" 2>/dev/null | head -30 || true
+        echo ""
+      fi
+    fi
+  done
+
+  if $changed; then
+    if $DRY_RUN; then
+      : # already printed above
+    else
+      is_new=false
+      [[ ! -d "$dst" ]] && is_new=true
+
+      mkdir -p "$dst"
+      for relpath in "${files_to_sync[@]}"; do
+        if [[ "$relpath" == *.md ]]; then
+          # Copy the rewritten version
+          cp "$SYNC_TMPDIR/rewritten-$skill-$(basename "$relpath")" "$dst/$relpath"
+        else
+          src_file="$src/$relpath"
+          dst_file="$dst/$relpath"
+          mkdir -p "$(dirname "$dst_file")"
+          cp "$src_file" "$dst_file"
+          [[ "$relpath" == bin/* ]] && chmod +x "$dst_file"
+        fi
+      done
+
+      if $is_new; then
+        echo "  ADD   $skill"
+        ADDED=$(( ADDED + 1 ))
+      else
+        echo "  UPD   $skill"
+        UPDATED=$(( UPDATED + 1 ))
+      fi
+    fi
+  else
+    UNCHANGED=$(( UNCHANGED + 1 ))
+  fi
+done
+
+# --- Stale skill cleanup ---
+# Detect gstack-sourced skill dirs that are no longer in SYNC_SKILLS
+for dir in "$SKILLS_DIR"/*/; do
+  [[ ! -d "$dir" ]] && continue
+  skill_name=$(basename "$dir")
+
+  # Skip if in SYNC_SKILLS
+  in_list=false
+  for s in "${SYNC_SKILLS[@]}"; do
+    [[ "$s" == "$skill_name" ]] && { in_list=true; break; }
+  done
+  $in_list && continue
+
+  # Only act on gstack-sourced skills (never touch local skills)
+  if [[ -f "$dir/SKILL.md" ]] && grep -q "$GSTACK_MARKER" "$dir/SKILL.md" 2>/dev/null; then
+    if $DRY_RUN; then
+      echo "  STALE $skill_name (would be removed)"
+    else
+      echo "  STALE $skill_name (gstack-sourced, removed from sync list)"
+      rm -rf "$dir"
+    fi
+  fi
+done
+
+# --- Post-sync verification ---
+if ! $DRY_RUN; then
+  residual=$(grep -rl 'skills/gstack/' "$SKILLS_DIR"/*/SKILL.md 2>/dev/null || true)
+  if [[ -n "$residual" ]]; then
+    echo ""
+    echo "WARNING: Residual gstack/ path references found in:"
+    echo "$residual"
+    echo "These skills may have broken bin paths. Check rewrite_paths() coverage."
+  fi
+
+  # Write sync state
+  cat > "$SKILLS_DIR/.gstack-sync-state" <<EOF
+sha=$SYNCED_SHA
+ref=$REF
+date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+skills=$(IFS=,; echo "${SYNC_SKILLS[*]}")
+EOF
+fi
+
+echo ""
+if $DRY_RUN; then
+  echo "Dry run complete. No files written."
+else
+  echo "Sync complete: $ADDED added, $UPDATED updated, $UNCHANGED unchanged."
+  echo "Pinned: gstack@${REF} (${SYNCED_SHA:0:12})"
+fi

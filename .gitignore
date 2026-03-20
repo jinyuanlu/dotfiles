@@ -1,3 +1,4 @@
 .claude/settings.local.json
+.claude/skills/.gstack-sync-state
 .claude/skills/browse/dist/
 .claude/skills/browse/node_modules/
