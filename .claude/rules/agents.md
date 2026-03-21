@@ -14,7 +14,8 @@ Located in `~/.claude/agents/`:
 | e2e-runner | E2E testing | Critical user flows |
 | refactor-cleaner | Dead code cleanup | Code maintenance |
 | doc-updater | Documentation | Updating docs |
-| challenge | Devil's advocate review | After planning, before committing to approach |
+| challenge | Technical devil's advocate | After planning, before committing to approach |
+| jobs-review | Product/UX critique | After UI/UX/product decisions |
 
 ## Immediate Agent Usage
 
@@ -24,14 +25,43 @@ No user prompt needed:
 3. Bug fix or new feature - Use **tdd-guide** agent
 4. Architectural decision - Use **architect** agent
 5. Plan or design proposed - Use **challenge** agent
+6. UI/UX or product decision - Use **jobs-review** agent
 
 ## Agent Chaining
 
-After receiving results from these agents, automatically invoke **challenge** with those results before proceeding:
+After an agent completes, route its output to reviewers. Which reviewers depends on what the work touches.
 
-- `planner` → `challenge` — Challenge the plan before implementation
-- `architect` → `challenge` — Challenge the design before committing
-- `code-reviewer` → `challenge` — Challenge non-trivial review findings
+### Reviewer classification
+
+- **challenge** — always applies. Technical correctness, simplicity, compositional integrity.
+- **jobs-review** — applies when the work has **user-facing surface**: UI components, CLI output, API responses consumed by humans, error messages, onboarding flows, information architecture changes.
+
+### Routing rules
+
+Determine which reviewers apply, then run them in parallel:
+
+```
+  planner ──┬──→ challenge        (always)
+            └──→ jobs-review      (if plan touches UI/UX)
+
+  architect ─┬──→ challenge       (always)
+             └──→ jobs-review     (if architecture affects user experience)
+
+  code-reviewer ──→ challenge     (non-trivial findings only)
+```
+
+When both reviewers apply, launch them **in parallel** — they evaluate orthogonal concerns and do not depend on each other.
+
+### How to decide if jobs-review applies
+
+Ask one question: **will a person using the product see or feel this change?** If yes, route to `jobs-review`. Examples:
+
+- New API endpoint returning JSON → no (machine consumer)
+- New API endpoint powering a UI → yes (user sees the result)
+- Database migration → no
+- New settings page → yes
+- Error handling refactor → yes (user sees error messages)
+- Performance optimization → maybe (user feels faster load times)
 
 ## Parallel Task Execution
 
