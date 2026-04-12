@@ -49,7 +49,7 @@ Requires [bun](https://bun.sh). The browse CLI compiles Playwright into a standa
       │
       ▼
   implement            write code (agents auto-fire: code-reviewer, tdd-guide)
-      │
+      │                (use /careful or /freeze to scope edits while debugging)
       ▼
 /investigate           debug with root cause discipline (scope-locked edits)
       │
@@ -62,8 +62,9 @@ Requires [bun](https://bun.sh). The browse CLI compiles Playwright into a standa
 /qa-only               browser-based QA → report only (no fixes)
       │
       ▼
-/commit                conventional commit
-/pr                    create PR with summary
+/ship                  merge base, tests, review, version bump, PR
+/document-release      post-ship docs sync (README, CHANGELOG, ARCHITECTURE)
+/retro                 weekly engineering retrospective with trend tracking
 ```
 
 ### Skills reference
@@ -71,18 +72,27 @@ Requires [bun](https://bun.sh). The browse CLI compiles Playwright into a standa
 | Skill | Invoke | What it does |
 |-------|--------|-------------|
 | browse | `/browse` | Headless Chromium CLI (~100ms/cmd). Navigate, click, screenshot, diff pages |
-| review | `/review` | Pre-landing diff review with fix-first flow |
-| design-review | `/design-review` | Visual audit of live site → fix → re-verify |
-| plan-ceo-review | `/plan-ceo-review` | CEO/founder plan review (4 modes: expand/selective/hold/reduce) |
-| plan-eng-review | `/plan-eng-review` | Engineering plan review (architecture → tests → perf) |
-| plan-design-review | `/plan-design-review` | Designer's eye plan review (7 passes, 0-10 ratings) |
-| investigate | `/investigate` | Root cause debugging with scope-locked edits |
-| office-hours | `/office-hours` | YC-style product brainstorming → design doc |
+| careful | `/careful` | Destructive command guardrails (rm -rf, DROP TABLE, force-push, etc.) |
 | design-consultation | `/design-consultation` | Create DESIGN.md (typography, color, spacing, motion) |
+| design-review | `/design-review` | Visual audit of live site → fix → re-verify |
+| document-release | `/document-release` | Post-ship docs sync (README, CHANGELOG, ARCHITECTURE) |
+| eval-harness | `/eval-harness` | Eval-driven development framework |
+| freeze | `/freeze` | Restrict file edits to a specific directory for the session |
+| guard | `/guard` | Full safety mode: /careful + /freeze combined |
+| investigate | `/investigate` | Root cause debugging with scope-locked edits |
+| jobs-review | `/jobs-review` | Steve Jobs product review (scores 0-10, coherence audit) |
+| market-research | `/market-research` | Competitive analysis and market sizing |
+| office-hours | `/office-hours` | YC-style product brainstorming → design doc |
+| plan-ceo-review | `/plan-ceo-review` | CEO/founder plan review (4 modes: expand/selective/hold/reduce) |
+| plan-design-review | `/plan-design-review` | Designer's eye plan review (7 passes, 0-10 ratings) |
+| plan-eng-review | `/plan-eng-review` | Engineering plan review (architecture → tests → perf) |
 | qa | `/qa` | Browser QA → fix bugs → commit each fix atomically |
 | qa-only | `/qa-only` | Browser QA → report only, no fixes |
-| eval-harness | `/eval-harness` | Eval-driven development framework |
-| market-research | `/market-research` | Competitive analysis and market sizing |
+| retro | `/retro` | Weekly engineering retrospective with trend tracking |
+| review | `/review` | Pre-landing diff review (SQL safety, race conditions, etc.) |
+| setup-browser-cookies | `/setup-browser-cookies` | Import cookies from real browser into headless session |
+| ship | `/ship` | Merge base, tests, review, version bump, PR, push |
+| unfreeze | `/unfreeze` | Clear freeze boundary, allow edits everywhere again |
 | worktree | `/worktree` | Git worktrees for parallel feature development |
 
 ### Agents reference
@@ -96,6 +106,7 @@ Requires [bun](https://bun.sh). The browse CLI compiles Playwright into a standa
 | tdd-guide | New features, bug fixes | Test-driven development |
 | e2e-runner | Critical user flows | Playwright E2E tests |
 | challenge | After planner/architect | Devil's advocate critique |
+| jobs-review | After UI/UX decisions | Steve Jobs product critique |
 | refactor-cleaner | Code maintenance | Dead code removal |
 | doc-updater | After changes | Documentation sync |
 
@@ -122,6 +133,9 @@ Scripts in `.claude/skills/bin/` used by skills internally:
 | `review-log` | Append review result to per-project JSONL |
 | `review-read` | Read review dashboard data |
 | `diff-scope` | Categorize diff as frontend/backend/tests/docs/config |
+| `sync-gstack` | Pull latest gstack skills from GitHub into dotfiles |
+| `telemetry-log` | No-op stub (skill activations logged via skill-usage.jsonl) |
+| `update-check` | No-op stub (replaces gstack update check) |
 
 ### State directories
 
