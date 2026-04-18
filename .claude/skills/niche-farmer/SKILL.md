@@ -49,49 +49,76 @@ After intake, restate the hunting brief in 3-4 lines and confirm before running 
 
 Run searches in parallel. Every claim cites a URL.
 
-### Source → Principle map
+### Source → Principle map (ranked by user-voice purity)
 
-Only sources reliably indexed and searchable via `WebSearch` and readable via `WebFetch` are listed here. Discord, Slack, and private FB groups are **not auto-crawlable** — they are handled by the P3 user-supplied fallback below, not hunted here.
+Not all sources are equal. A "complaint" on Twitter is 90% performance. A 1-star review on G2 is 90% real pain. The skill ranks evidence by **how likely the author had zero incentive to perform**. Sources where writing takes effort and no one is watching > sources where the author is building a personal brand.
 
-#### Tier-1 English sources
+**Core insight:** The biggest lie of indie-hacker source hunting is that the goldmine is r/SaaS, r/Entrepreneur, r/SideProject, Twitter, or Indie Hackers. Those are **founder echo chambers** — people selling to each other. The real goldmine is **vertical pro subs and industry forums** where members don't know the word "indie hacker" — they're just complaining about tools they use every day. Examples: `r/PropertyManagement`, `r/Bookkeeping`, `r/Esthetics`, `r/Veterinary`, `r/Plumbing`, `r/Mortgages`, `r/dentistry`, `r/accounting`, `r/LawFirm`, `r/RealEstate`, `r/HumanResources`.
 
-| Source | Query pattern | Proves |
-|--------|---------------|--------|
-| Reddit complaint threads | `site:reddit.com/r/{niche} "I hate" OR "annoying" OR "waste of time"` | P1, P2 |
-| Reddit pay-for threads | `site:reddit.com "what do you pay for" OR "tools you pay for" {niche}` | P1, P2 |
-| Reddit alternative hunts | `site:reddit.com "{incumbent} alternative" OR "better than {incumbent}"` | P1 |
-| Twitter / X complaint mining | `"I wish there was" {domain}` / `"we pay $" {domain}` / `"costs me $X/mo"` / `"$X/hour"` | P1, P2 |
-| Upwork repeat-gig listings | `site:upwork.com {task}` — open-job count + budgets | P1, P2 (budgets quantify dollar pain) |
-| Fiverr hot categories | `site:fiverr.com {task}` — review count = volume proxy | P1 |
-| G2 / Capterra 1-2★ reviews | `site:g2.com {incumbent} reviews` / `site:capterra.com {incumbent}` | P1, P2 |
-| TrustPilot 1-2★ reviews | `site:trustpilot.com {incumbent}` | P1, P2 |
-| Indie Hackers forum | `site:indiehackers.com "paying customers" {domain}` | P1, P2, P5 |
-| Hacker News | `site:news.ycombinator.com "Ask HN" "what do you pay for" OR "boring business"` | P1, P4 |
-| ProductHunt negative comments | `site:producthunt.com {domain}` + scan comments | P1, P2 |
-| Chrome Web Store 1-2★ | `site:chromewebstore.google.com {extension}` + WebFetch review page | P1, P2 |
-| Shopify App Store 1-2★ | `site:apps.shopify.com {app}` + WebFetch review page | P1, P2 |
-| Notion Marketplace reviews | `site:notion.so/marketplace {template}` + WebFetch | P1, P2 |
-| YouTube tutorial comments | `site:youtube.com "how to {tedious task}"` → WebFetch top videos → scan comments | P2 |
-| LinkedIn job boards | `site:linkedin.com/jobs "{weird specific role}"` | P3 proxy (role exists → community exists) |
-| "Alternatives to X" pages | `"{incumbent} alternatives"` — SaaS discovery sites | P1 |
-| Blog churn post-mortems | `"why I switched from {incumbent}"` / `"why we left {incumbent}"` | P5 (lock-in insight) |
+#### TIER 1 — 90%+ pure (no performance incentive)
 
-#### Tier-1 Chinese-market sources
+Use these as the **primary** evidence for P1/P2/P5. Every QUALIFIED niche needs at least 2 P-signals anchored in a Tier-1 source.
 
-Run when the intake phase specified a non-English market OR the user asked for 中文 niches. Search patterns prefer `site:` operator since WebSearch indexing of these domains is reliable.
+| Source | Why clean | How to hunt |
+|--------|-----------|-------------|
+| **GitHub Issues** | Writing an issue is pure cost; author gets zero reward | `site:github.com/{repo}/issues "{pain keyword}"` → WebFetch. Filter: `is:issue label:bug OR label:feature-request` with 👍 count ≥ 3 |
+| **App Store 1-3★ reviews** (iOS) | User paid money and is still angry = real pain, quantified spend | `site:apps.apple.com {app}` → WebFetch review page; extract 1-3★ with ≥200 chars |
+| **Google Play low-star reviews** | Same — money-in-hand + still angry | `site:play.google.com/store/apps {app}` → WebFetch; filter low-star |
+| **G2 / Capterra 1-2★ reviews** | B2B user paying $X/seat and writing a long negative = quantified pain | `site:g2.com/products/{slug}/reviews` / `site:capterra.com/p/{id}/reviews` → WebFetch |
+| **Trustpilot long negatives (≥200 chars)** | 200-word rant = real pain, not performance | `site:trustpilot.com/review/{domain}` → WebFetch; filter 1-2★ long-form |
+| **Stack Overflow bountied unanswered** | User spent reputation → unmet technical need | `site:stackoverflow.com {tag} "bounty"` + no accepted answer |
+| **Upwork repeat-gig listings with budgets** | Real money moving to humans for the same task = demand proven | `site:upwork.com {task}` → count open jobs + sum budgets |
+| **Chrome Web Store / Shopify App Store / Notion Marketplace 1-2★** | Paid user + still negative | `site:chromewebstore.google.com` / `site:apps.shopify.com` / `site:notion.so/marketplace` → WebFetch review pages |
 
-| Source | Query pattern | Proves |
-|--------|---------------|--------|
-| 知乎 (Zhihu) | `site:zhihu.com "{domain}" ("讨厌" OR "每月付" OR "订阅" OR "浪费时间")` | P1, P2 |
-| 知乎 "替代" hunts | `site:zhihu.com "{incumbent} 替代" OR "{incumbent} 平替"` | P1 |
-| V2EX | `site:v2ex.com "{domain}" ("订阅" OR "付费" OR "替代")` | P1, P2 (dev/SaaS buyers) |
-| 少数派 (sspai) | `site:sspai.com "{tool} 替代" OR "{domain} 工具"` | P1 (tool-review audience) |
-| 小众软件 (appinn) | `site:appinn.com "{domain}"` — tool reviews + comments | P1, P2 |
-| 小红书 (Xiaohongshu) | `site:xiaohongshu.com "{niche}"` — B2C/lifestyle pain | P1, P2 (consumer) |
-| 即刻 (Jike) | `site:okjike.com "{domain}"` — bite-size pain posts (WebSearch coverage limited) | P1, P2 |
-| 即刻 / 微博 via WebFetch | WebFetch specific thread URLs the user provides | P1-P5 (manual depth) |
-| 36Kr / 虎嗅 industry reports | `site:36kr.com "{行业} 赛道"` / `site:huxiu.com` — who pays in this category | P1 |
-| 脉脉 (Maimai) job/salary posts | `site:maimai.cn "{岗位}"` — weird specific role → audience exists | P3 proxy |
+#### TIER 2 — 50-80% pure (filter needed)
+
+Use as secondary corroboration, not primary evidence. Prefer **deep comments over top-level posts** because comments are cheaper to write and less branded.
+
+| Source | Note + hunt pattern |
+|--------|----------------------|
+| **Reddit comments in vertical pro subs** | Members don't know what "indie hacker" means — they just vent. `site:reddit.com/r/{vertical-pro-sub} "I hate" OR "wish" OR "every week"`. Read comments **under** top posts, not the posts. |
+| **YouTube comments on "best X tool" videos** | Comments under tool-review videos often say "tried X, still wish it did Y" | `site:youtube.com "{incumbent} review" OR "best {category} tool"` → WebFetch top videos → scan comments |
+| **Hacker News comments (not Show HN posts)** | Comment section is 10× more honest than submissions. `site:news.ycombinator.com {domain}` → WebFetch thread → comments with ≥3 children |
+| **Substack paid-newsletter comments** | Paying audience = high-quality signal | `site:substack.com "{domain}"` → WebFetch; read comments on tool-coverage posts |
+| **Discord help/support channels** | Private + asking for help = real unmet need. **Not auto-crawlable** — use P3 user-supplied fallback; ask user to paste pain-rich quotes |
+
+#### TIER 3 — <30% pure (mostly marketing/performance — AVOID)
+
+Do **not** use as primary evidence. If a niche's only support comes from these sources, it's KILLED on P1. If cited at all, flag as `[TIER-3]` in `shortlist.md`.
+
+| Source | Why dirty |
+|--------|-----------|
+| Reddit top-level posts in meta-subs (r/SaaS, r/Entrepreneur, r/SideProject, r/startups) | 30%+ is founder shilling + SEO; another 30% is ideation theater |
+| Twitter / X | 90% performative. "I wish there was" = building personal brand, not paying |
+| LinkedIn posts | ~100% performative |
+| Indie Hackers *posts* (the comments can be OK) | Founders plugging each other; selection bias toward "I'm shipping!" |
+| Product Hunt | 100% launch marketing. "Looks amazing!" ≠ will pay |
+| Medium / dev.to listicles | SEO-farmed "top 10 tools for X" content |
+| Quora | Overrun with AI slop |
+| Any "Alternatives to X" marketing page | SEO-bait, often paid placement |
+
+Use Twitter/LinkedIn/ProductHunt only for **tertiary confirmation** of a specific claim (e.g., you already have Tier-1 evidence and want one more data point). Never as the anchor.
+
+#### TIER 1/2 Chinese-market sources
+
+Activate when intake specifies non-English market OR user requests 中文. Same purity tiering applies.
+
+**TIER 1:**
+| Source | Why clean | Hunt pattern |
+|--------|-----------|--------------|
+| App Store 中区 / 酷安 1-3★ | Paid + angry | `site:coolapk.com {app}` → WebFetch; 苹果中区 via iTunes RSS |
+| GitHub Issues on Chinese-maintainer repos | Same purity as EN | `site:github.com {repo} is:issue` + 中文 keyword |
+| V2EX 吐槽 / 求助帖 | Dev community, low performance incentive in `/t/` threads | `site:v2ex.com/t "{domain}" ("吐槽" OR "求助" OR "替代")` |
+| 小众软件 / 少数派 tool-review long comments | Long-form negatives under tool reviews | `site:appinn.com {tool}` / `site:sspai.com {tool}` → read comments, not post |
+
+**TIER 2:**
+| Source | Note |
+|--------|------|
+| 知乎 长负面回答 (≥500 字 且反对多) | Long contrarian answers are real; short vote-farming answers are noise. Filter: `site:zhihu.com "{domain}"` → WebFetch → answers with ≥500 chars and clearly negative |
+| B 站 视频评论区 "最好的 {category} 工具" | Comments under tool-review videos | `site:bilibili.com "{category} 工具 对比"` → WebFetch → comments |
+| 豆瓣小组 (vertical interest groups) | Members are enthusiasts, not founders | `site:douban.com/group "{niche}"` |
+
+**TIER 3 (AVOID):** 小红书 planted posts, 即刻 founder circle, 36Kr / 虎嗅 (全是 PR 稿), 脉脉 职场表演, 微博 大V 营销.
 
 ### WebFetch depth pass
 
@@ -339,6 +366,9 @@ Run this checklist. Any fail → do not deliver; fix and re-hunt.
 - [ ] Every P4 claim describes dirty work an LLM can't weekend-clone, with a reason
 - [ ] Every P5 claim names a specific lock-in mechanism (data / integration / habit / artifact)
 - [ ] P6 sketch exists — specific channel + offer + price + 60-day plan
+- [ ] **At least 2 of the 5 P-signals are anchored in a TIER-1 source** (GitHub Issues / App Store / G2 / Trustpilot / Stack Overflow bountied / Upwork budgets). Tier-3-only evidence → niche is KILLED.
+- [ ] No QUALIFIED niche sources only from r/SaaS / r/Entrepreneur / Twitter / LinkedIn / ProductHunt / IH posts (founder echo chambers — see Tier 3)
+- [ ] Reddit evidence comes from **vertical pro subs** (r/PropertyManagement, r/Bookkeeping, r/Esthetics, r/Veterinary, etc.) — not meta founder subs
 - [ ] No 4/5 niches sneaking through as "promising"
 - [ ] Anti-pattern checklist run — no "wish there was", no LLM-wrapper, no use-once utility, no VC-scale bets
 - [ ] 3-day MVP scope is actually 3 days (no "and also integrations with...")
