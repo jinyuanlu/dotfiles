@@ -231,7 +231,7 @@ One row per niche hunted. `url_evidence` = pipe-separated top-3 source URLs.
 
 ## Output Artifacts
 
-All under `niches/{YYMMDD}-{HHMM}-{hunt-slug}/`:
+All under `~/.claude/niches/{YYMMDD}-{HHMM}-{hunt-slug}/`:
 
 ### Required
 
@@ -250,7 +250,7 @@ All under `niches/{YYMMDD}-{HHMM}-{hunt-slug}/`:
 ```bash
 STAMP=$(date +%y%m%d-%H%M)
 SLUG={hunt-slug}
-mkdir -p "niches/${STAMP}-${SLUG}"
+mkdir -p ~/.claude/niches/${STAMP}-${SLUG}
 ```
 
 ## One-Pager Template (per QUALIFIED niche in `shortlist.md`)
