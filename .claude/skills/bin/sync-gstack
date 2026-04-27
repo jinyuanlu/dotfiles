@@ -49,16 +49,16 @@ usage() {
 }
 
 # Rewrite gstack-specific paths in a SKILL.md to match dotfiles layout.
-# Three rules (DRY — each captures a pattern, not individual instances):
-#   1. gstack bin scripts:  skills/gstack/bin/gstack-{name} → skills/bin/{name}
-#   2. browse binary/tools: skills/gstack/browse/           → skills/browse/
-#   3. gstack-upgrade refs: skills/gstack/gstack-upgrade/   → skills/gstack-upgrade/
+# Two rules, applied in order:
+#   1. gstack-bin scripts:  skills/gstack/bin/gstack-{name} → skills/bin/{name}
+#      (strips both the parent `gstack/` and the `gstack-` filename prefix)
+#   2. Blanket fallback:    skills/gstack/{anything}        → skills/{anything}
+#      (catches per-skill subpaths, marker files, ETHOS.md, etc.)
 rewrite_paths() {
   local file="$1"
   sed -i '' \
     -e 's|skills/gstack/bin/gstack-|skills/bin/|g' \
-    -e 's|skills/gstack/browse/|skills/browse/|g' \
-    -e 's|skills/gstack/gstack-upgrade/|skills/gstack-upgrade/|g' \
+    -e 's|skills/gstack/|skills/|g' \
     "$file"
 }
 
@@ -99,36 +99,37 @@ for skill in "${SYNC_SKILLS[@]}"; do
     continue
   fi
 
-  # Collect files to sync: SKILL.md + bin/* + supplementary *.md (e.g. checklist.md)
-  files_to_sync=("SKILL.md")
-  for f in "$src"/*.md; do
-    [[ -f "$f" ]] || continue
-    local_name=$(basename "$f")
-    [[ "$local_name" == "SKILL.md" || "$local_name" == "SKILL.md.tmpl" ]] && continue
-    files_to_sync+=("$local_name")
-  done
+  # Collect files to sync:
+  #   - all *.md files at any depth (e.g. SKILL.md, checklist.md, specialists/*.md)
+  #   - all files under bin/
+  # Code subdirs (src/, setup/, dist/, node_modules/) are intentionally skipped —
+  # local forks (e.g. browse/src) own those.
+  files_to_sync=()
+  while IFS= read -r f; do
+    rel="${f#$src/}"
+    base=$(basename "$f")
+    [[ "$base" == "SKILL.md.tmpl" ]] && continue
+    files_to_sync+=("$rel")
+  done < <(find "$src" -name '*.md' -type f 2>/dev/null)
   if [[ -d "$src/bin" ]]; then
     for f in "$src/bin/"*; do
       [[ -f "$f" ]] && files_to_sync+=("bin/$(basename "$f")")
     done
   fi
 
-  # Rewrite paths in temp copies of all .md files for accurate diff comparison
+  # Rewrite paths in temp copies of every synced text file (md + bin scripts).
+  # Encode "/" as "_" in temp filename to avoid collisions across subdirs.
   for relpath in "${files_to_sync[@]}"; do
-    if [[ "$relpath" == *.md ]]; then
-      rewritten="$SYNC_TMPDIR/rewritten-$skill-$(basename "$relpath")"
-      cp "$src/$relpath" "$rewritten"
-      rewrite_paths "$rewritten"
-    fi
+    safe=$(echo "$relpath" | tr '/' '_')
+    rewritten="$SYNC_TMPDIR/rewritten-$skill-$safe"
+    cp "$src/$relpath" "$rewritten"
+    rewrite_paths "$rewritten"
   done
 
   changed=false
   for relpath in "${files_to_sync[@]}"; do
-    if [[ "$relpath" == *.md ]]; then
-      src_file="$SYNC_TMPDIR/rewritten-$skill-$(basename "$relpath")"
-    else
-      src_file="$src/$relpath"
-    fi
+    safe=$(echo "$relpath" | tr '/' '_')
+    src_file="$SYNC_TMPDIR/rewritten-$skill-$safe"
     dst_file="$dst/$relpath"
 
     if [[ ! -f "$dst_file" ]]; then
@@ -155,16 +156,11 @@ for skill in "${SYNC_SKILLS[@]}"; do
 
       mkdir -p "$dst"
       for relpath in "${files_to_sync[@]}"; do
-        if [[ "$relpath" == *.md ]]; then
-          # Copy the rewritten version
-          cp "$SYNC_TMPDIR/rewritten-$skill-$(basename "$relpath")" "$dst/$relpath"
-        else
-          src_file="$src/$relpath"
-          dst_file="$dst/$relpath"
-          mkdir -p "$(dirname "$dst_file")"
-          cp "$src_file" "$dst_file"
-          [[ "$relpath" == bin/* ]] && chmod +x "$dst_file"
-        fi
+        dst_file="$dst/$relpath"
+        mkdir -p "$(dirname "$dst_file")"
+        safe=$(echo "$relpath" | tr '/' '_')
+        cp "$SYNC_TMPDIR/rewritten-$skill-$safe" "$dst_file"
+        [[ "$relpath" == bin/* ]] && chmod +x "$dst_file"
       done
 
       if $is_new; then
@@ -206,7 +202,16 @@ done
 
 # --- Post-sync verification ---
 if ! $DRY_RUN; then
-  residual=$(grep -rl 'skills/gstack/' "$SKILLS_DIR"/*/SKILL.md 2>/dev/null || true)
+  # Scan all synced files (md + bin), not just SKILL.md, for residuals.
+  residual=$(grep -rl 'skills/gstack/' "$SKILLS_DIR" --include='*.md' 2>/dev/null || true)
+  for d in "$SKILLS_DIR"/*/bin/*; do
+    [[ -f "$d" ]] && grep -l 'skills/gstack/' "$d" >> /tmp/.gstack-residual.$$ 2>/dev/null || true
+  done
+  if [[ -f /tmp/.gstack-residual.$$ ]]; then
+    residual="$residual"$'\n'"$(cat /tmp/.gstack-residual.$$)"
+    rm -f /tmp/.gstack-residual.$$
+  fi
+  residual=$(echo "$residual" | grep -v '^$' || true)
   if [[ -n "$residual" ]]; then
     echo ""
     echo "WARNING: Residual gstack/ path references found in:"
