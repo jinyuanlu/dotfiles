@@ -15,6 +15,7 @@ GSTACK_MARKER="AUTO-GENERATED from SKILL.md.tmpl"
 SYNC_SKILLS=(
   browse
   careful
+  codex
   design-consultation
   design-review
   document-release
@@ -35,8 +36,8 @@ SYNC_SKILLS=(
 )
 
 # Skills deliberately excluded:
-#   codex          — requires Codex CLI (OpenAI-specific)
-#   gstack-upgrade — gstack self-updater (not relevant outside gstack)
+#   gstack-upgrade — gstack self-updater; sync-gstack is our upgrade mechanism
+#   setup-gbrain   — needs gbrain CLI + ~17 gstack-gbrain-* bin scripts we don't ship
 
 usage() {
   echo "Usage: sync-gstack [--dry-run] [--ref <branch|tag>]"
