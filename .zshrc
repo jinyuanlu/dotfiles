@@ -169,7 +169,7 @@ export PATH="$HOME/alr-2.1.0-bin-universal-macos/bin:$PATH"
 export PATH="$HOME/.alire/bin:$PATH"
 
 # bun completions
-[ -s "/Users/admin/.bun/_bun" ] && source "/Users/admin/.bun/_bun"
+[ -s "$HOME/.bun/_bun" ] && source "$HOME/.bun/_bun"
 
 # bun
 export BUN_INSTALL="$HOME/.bun"
@@ -189,4 +189,3 @@ else
 fi
 unset __conda_setup
 # <<< conda initialize <<<
-
