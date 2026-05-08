@@ -31,13 +31,40 @@ SYNC_SKILLS=(
   retro
   review
   setup-browser-cookies
+  setup-gbrain
   ship
+  sync-gbrain
   unfreeze
+)
+
+# Top-level gstack bin scripts (live in gstack/bin/, not in any skill dir)
+# that the gbrain skills shell out to. Synced into dotfiles skills/bin/
+# with the `gstack-` filename prefix stripped, matching the existing
+# rewrite convention (e.g. `skills/bin/config` for `gstack-config`).
+SYNC_TOP_BINS=(
+  gstack-gbrain-detect
+  gstack-gbrain-install
+  gstack-gbrain-lib.sh
+  gstack-gbrain-mcp-verify
+  gstack-gbrain-repo-policy
+  gstack-gbrain-source-wireup
+  gstack-gbrain-supabase-provision
+  gstack-gbrain-supabase-verify
+  gstack-gbrain-sync.ts
+  gstack-memory-ingest.ts
+  gstack-brain-sync
+  gstack-brain-enqueue
+)
+
+# Top-level gstack lib files imported by the SYNC_TOP_BINS TypeScript
+# orchestrators. Synced into skills/lib/ with `gstack-` prefix stripped.
+SYNC_TOP_LIB=(
+  lib/gbrain-sources.ts
+  lib/gstack-memory-helpers.ts
 )
 
 # Skills deliberately excluded:
 #   gstack-upgrade — gstack self-updater; sync-gstack is our upgrade mechanism
-#   setup-gbrain   — needs gbrain CLI + ~17 gstack-gbrain-* bin scripts we don't ship
 
 usage() {
   echo "Usage: sync-gstack [--dry-run] [--ref <branch|tag>]"
@@ -49,17 +76,33 @@ usage() {
   exit 0
 }
 
-# Rewrite gstack-specific paths in a SKILL.md to match dotfiles layout.
-# Two rules, applied in order:
-#   1. gstack-bin scripts:  skills/gstack/bin/gstack-{name} → skills/bin/{name}
+# Rewrite gstack-specific paths in a synced file to match dotfiles layout.
+# Rules are anchored on path-context characters (/, $, ", `, lib/, dirname)
+# so they don't touch error-message strings like `echo "gstack-X: failed"`.
+#
+#   1. SKILL.md preambles: skills/gstack/bin/gstack-{name} → skills/bin/{name}
 #      (strips both the parent `gstack/` and the `gstack-` filename prefix)
-#   2. Blanket fallback:    skills/gstack/{anything}        → skills/{anything}
-#      (catches per-skill subpaths, marker files, ETHOS.md, etc.)
+#   2. Blanket SKILL.md:   skills/gstack/{anything}        → skills/{anything}
+#   3. Cross-bin via $SCRIPT_DIR (bash):
+#        $SCRIPT_DIR/gstack-{name}  →  $SCRIPT_DIR/{name}
+#   4. Cross-bin via dirname (bash source statements):
+#        $(dirname "$0")/gstack-X   →  $(dirname "$0")/X
+#   5. TS lib imports (sync.ts, memory-ingest.ts):
+#        "../lib/gstack-X"          →  "../lib/X"
+#   6. TS sibling import (gbrain-sources.ts → memory-helpers):
+#        "./gstack-X"               →  "./X"
+#   7. TS sibling exec (sync.ts spawning siblings via import.meta.dir):
+#        import.meta.dir, "gstack-X" → import.meta.dir, "X"
 rewrite_paths() {
   local file="$1"
   sed -i '' \
     -e 's|skills/gstack/bin/gstack-|skills/bin/|g' \
     -e 's|skills/gstack/|skills/|g' \
+    -e 's|\$SCRIPT_DIR/gstack-|$SCRIPT_DIR/|g' \
+    -e 's|(dirname "\$0")/gstack-|(dirname "$0")/|g' \
+    -e 's|"\.\./lib/gstack-|"../lib/|g' \
+    -e 's|"\./gstack-|"./|g' \
+    -e 's|import\.meta\.dir, "gstack-|import.meta.dir, "|g' \
     "$file"
 }
 
@@ -177,6 +220,62 @@ for skill in "${SYNC_SKILLS[@]}"; do
   fi
 done
 
+# --- Top-level bin/lib sync (gbrain support files) ---
+# These don't live inside any skill dir; they're top-level gstack bins/lib
+# that the synced skills shell out to or import from.
+sync_top_file() {
+  local src_rel="$1" dst_rel="$2" exec_bit="$3"
+  local src="$SYNC_TMPDIR/gstack/$src_rel"
+  local dst="$SKILLS_DIR/$dst_rel"
+
+  if [[ ! -f "$src" ]]; then
+    echo "  SKIP  $dst_rel (source not found in gstack@${REF}: $src_rel)"
+    return
+  fi
+
+  local rewritten="$SYNC_TMPDIR/rewritten-top-$(echo "$dst_rel" | tr '/' '_')"
+  cp "$src" "$rewritten"
+  rewrite_paths "$rewritten"
+
+  if [[ ! -f "$dst" ]]; then
+    if $DRY_RUN; then
+      echo "  ADD   $dst_rel"
+    else
+      mkdir -p "$(dirname "$dst")"
+      cp "$rewritten" "$dst"
+      [[ "$exec_bit" == "yes" ]] && chmod +x "$dst"
+      echo "  ADD   $dst_rel"
+      ADDED=$(( ADDED + 1 ))
+    fi
+  elif ! diff -q "$rewritten" "$dst" > /dev/null 2>&1; then
+    if $DRY_RUN; then
+      echo "  UPD   $dst_rel"
+    else
+      cp "$rewritten" "$dst"
+      [[ "$exec_bit" == "yes" ]] && chmod +x "$dst"
+      echo "  UPD   $dst_rel"
+      UPDATED=$(( UPDATED + 1 ))
+    fi
+  else
+    UNCHANGED=$(( UNCHANGED + 1 ))
+  fi
+}
+
+# Strip `gstack-` prefix from filename (matches the existing skills/bin/
+# rewrite convention). gstack-gbrain-detect → bin/gbrain-detect.
+for src_name in "${SYNC_TOP_BINS[@]}"; do
+  dst_name="${src_name#gstack-}"
+  sync_top_file "bin/$src_name" "bin/$dst_name" yes
+done
+
+# lib/ files: same convention, strip `gstack-` from filename.
+# Files already named without prefix (e.g. gbrain-sources.ts) pass through.
+for src_rel in "${SYNC_TOP_LIB[@]}"; do
+  base=$(basename "$src_rel")
+  dst_base="${base#gstack-}"
+  sync_top_file "$src_rel" "lib/$dst_base" no
+done
+
 # --- Stale skill cleanup ---
 # Detect gstack-sourced skill dirs that are no longer in SYNC_SKILLS
 for dir in "$SKILLS_DIR"/*/; do
@@ -203,21 +302,28 @@ done
 
 # --- Post-sync verification ---
 if ! $DRY_RUN; then
-  # Scan all synced files (md + bin), not just SKILL.md, for residuals.
-  residual=$(grep -rl 'skills/gstack/' "$SKILLS_DIR" --include='*.md' 2>/dev/null || true)
-  for d in "$SKILLS_DIR"/*/bin/*; do
-    [[ -f "$d" ]] && grep -l 'skills/gstack/' "$d" >> /tmp/.gstack-residual.$$ 2>/dev/null || true
-  done
-  if [[ -f /tmp/.gstack-residual.$$ ]]; then
-    residual="$residual"$'\n'"$(cat /tmp/.gstack-residual.$$)"
-    rm -f /tmp/.gstack-residual.$$
-  fi
-  residual=$(echo "$residual" | grep -v '^$' || true)
+  # Scan all synced files for residual paths or unrewritten cross-refs.
+  # Patterns checked:
+  #   - `skills/gstack/`  — old SKILL.md preamble references
+  #   - `gstack-gbrain-`, `gstack-memory-`, `gstack-brain-` outside of
+  #     comments/docstrings — possible unrewritten cross-bin refs
+  residual_file=/tmp/.gstack-residual.$$
+  : > "$residual_file"
+
+  while IFS= read -r f; do
+    # Skip sync-gstack itself — it contains `skills/gstack/` as the literal
+    # rewrite regex it applies to other files.
+    [[ "$(basename "$f")" == "sync-gstack" ]] && continue
+    [[ -f "$f" ]] && grep -l 'skills/gstack/' "$f" >> "$residual_file" 2>/dev/null || true
+  done < <(find "$SKILLS_DIR" \( -name '*.md' -o -path '*/bin/*' -o -path '*/lib/*' \) -type f 2>/dev/null)
+
+  residual=$(sort -u "$residual_file" 2>/dev/null || true)
+  rm -f "$residual_file"
   if [[ -n "$residual" ]]; then
     echo ""
     echo "WARNING: Residual gstack/ path references found in:"
     echo "$residual"
-    echo "These skills may have broken bin paths. Check rewrite_paths() coverage."
+    echo "These files may have broken refs. Check rewrite_paths() coverage."
   fi
 
   # Write sync state
@@ -226,6 +332,8 @@ sha=$SYNCED_SHA
 ref=$REF
 date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 skills=$(IFS=,; echo "${SYNC_SKILLS[*]}")
+top_bins=$(IFS=,; echo "${SYNC_TOP_BINS[*]}")
+top_lib=$(IFS=,; echo "${SYNC_TOP_LIB[*]}")
 EOF
 fi
 

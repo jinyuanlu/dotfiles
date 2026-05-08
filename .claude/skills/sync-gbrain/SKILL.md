@@ -1,24 +1,27 @@
 ---
-name: qa-only
-preamble-tier: 4
+name: sync-gbrain
+preamble-tier: 2
 version: 1.0.0
 description: |
-  Report-only QA testing. Systematically tests a web application and produces a
-  structured report with health score, screenshots, and repro steps — but never
-  fixes anything. Use when asked to "just report bugs", "qa report only", or
-  "test but don't fix". For the full test-fix-verify loop, use /qa instead.
-  Proactively suggest when the user wants a bug report without any code changes. (gstack)
-  Voice triggers (speech-to-text aliases): "bug report", "just check for bugs".
+  Keep gbrain current with this repo's code and refresh agent search
+  guidance in CLAUDE.md. Wraps the gstack-gbrain-sync orchestrator with
+  state probing, native code-surface registration, capability checks,
+  and a verdict block. Re-runnable, idempotent. Use when: "sync gbrain",
+  "refresh gbrain", "re-index this repo", "gbrain search isn't finding
+  things". (gstack)
+triggers:
+  - sync gbrain
+  - refresh gbrain
+  - reindex repo
+  - update gbrain
 allowed-tools:
   - Bash
   - Read
   - Write
+  - Edit
+  - Glob
+  - Grep
   - AskUserQuestion
-  - WebSearch
-triggers:
-  - qa report only
-  - just report bugs
-  - test but dont fix
 ---
 <!-- AUTO-GENERATED from SKILL.md.tmpl — do not edit directly -->
 <!-- Regenerate: bun run gen:skill-docs -->
@@ -58,7 +61,7 @@ _QUESTION_TUNING=$(~/.claude/skills/bin/config get question_tuning 2>/dev/null |
 echo "QUESTION_TUNING: $_QUESTION_TUNING"
 mkdir -p ~/.gstack/analytics
 if [ "$_TEL" != "off" ]; then
-echo '{"skill":"qa-only","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","repo":"'$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo "unknown")'"}'  >> ~/.gstack/analytics/skill-usage.jsonl 2>/dev/null || true
+echo '{"skill":"sync-gbrain","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","repo":"'$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo "unknown")'"}'  >> ~/.gstack/analytics/skill-usage.jsonl 2>/dev/null || true
 fi
 for _PF in $(find ~/.gstack/analytics -maxdepth 1 -name '.pending-*' 2>/dev/null); do
   if [ -f "$_PF" ]; then
@@ -80,7 +83,7 @@ if [ -f "$_LEARN_FILE" ]; then
 else
   echo "LEARNINGS: 0"
 fi
-~/.claude/skills/bin/timeline-log '{"skill":"qa-only","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
+~/.claude/skills/bin/timeline-log '{"skill":"sync-gbrain","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
 _HAS_ROUTING="no"
 if [ -f CLAUDE.md ] && grep -q "## Skill routing" CLAUDE.md 2>/dev/null; then
   _HAS_ROUTING="yes"
@@ -656,7 +659,7 @@ Before each AskUserQuestion, choose `question_id` from `scripts/question-registr
 
 After answer, log best-effort:
 ```bash
-~/.claude/skills/bin/question-log '{"skill":"qa-only","question_id":"<id>","question_summary":"<short>","category":"<approval|clarification|routing|cherry-pick|feedback-loop>","door_type":"<one-way|two-way>","options_count":N,"user_choice":"<key>","recommended":"<key>","session_id":"'"$_SESSION_ID"'"}' 2>/dev/null || true
+~/.claude/skills/bin/question-log '{"skill":"sync-gbrain","question_id":"<id>","question_summary":"<short>","category":"<approval|clarification|routing|cherry-pick|feedback-loop>","door_type":"<one-way|two-way>","options_count":N,"user_choice":"<key>","recommended":"<key>","session_id":"'"$_SESSION_ID"'"}' 2>/dev/null || true
 ```
 
 For two-way questions, offer: "Tune this question? Reply `tune: never-ask`, `tune: always-ask`, or free-form."
@@ -669,24 +672,6 @@ Write (only after confirmation for free-form):
 ```
 
 Exit code 2 = rejected as not user-originated; do not retry. On success: "Set `<id>` → `<preference>`. Active immediately."
-
-## Repo Ownership — See Something, Say Something
-
-`REPO_MODE` controls how to handle issues outside your branch:
-- **`solo`** — You own everything. Investigate and offer to fix proactively.
-- **`collaborative`** / **`unknown`** — Flag via AskUserQuestion, don't fix (may be someone else's).
-
-Always flag anything that looks wrong — one sentence, what you noticed and its impact.
-
-## Search Before Building
-
-Before building anything unfamiliar, **search first.** See `~/.claude/skills/ETHOS.md`.
-- **Layer 1** (tried and true) — don't reinvent. **Layer 2** (new and popular) — scrutinize. **Layer 3** (first principles) — prize above all.
-
-**Eureka:** When first-principles reasoning contradicts conventional wisdom, name it and log:
-```bash
-jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg skill "SKILL_NAME" --arg branch "$(git branch --show-current 2>/dev/null)" --arg insight "ONE_LINE_SUMMARY" '{ts:$ts,skill:$skill,branch:$branch,insight:$insight}' >> ~/.gstack/analytics/eureka.jsonl 2>/dev/null || true
-```
 
 ## Completion Status Protocol
 
@@ -743,459 +728,258 @@ In plan mode before ExitPlanMode: if the plan file lacks `## GSTACK REVIEW REPOR
 
 PLAN MODE EXCEPTION — always allowed (it's the plan file).
 
-# /qa-only: Report-Only QA Testing
+# /sync-gbrain — Keep gbrain current and teach the agent to use it
 
-You are a QA engineer. Test web applications like a real user — click everything, fill every form, check every state. Produce a structured report with evidence. **NEVER fix anything.**
+You are running the canonical "keep this brain up to date" verb. /setup-gbrain
+installs gbrain once; /sync-gbrain runs every time the user wants the brain
+refreshed against this repo's current state, and refreshes the agent-side
+guidance in CLAUDE.md so the coding agent knows when to prefer `gbrain`
+search over Grep.
 
-## Setup
+**Architecture (post-codex review):** This skill uses gbrain v0.20.0+'s
+**native code surfaces** (`gbrain sources add`, `gbrain sync --strategy code`,
+`gbrain reindex-code`, `gbrain code-def/code-refs/code-callers/code-callees`).
+It does NOT use `gbrain import` (that path is for markdown directories).
+It does NOT touch `~/.gstack/` indexing (the existing `gstack-gbrain-source-wireup`
+owns that — never double-store).
 
-**Parse the user's request for these parameters:**
+## User-invocable
 
-| Parameter | Default | Override example |
-|-----------|---------|-----------------:|
-| Target URL | (auto-detect or required) | `https://myapp.com`, `http://localhost:3000` |
-| Mode | full | `--quick`, `--regression .gstack/qa-reports/baseline.json` |
-| Output dir | `.gstack/qa-reports/` | `Output to /tmp/qa` |
-| Scope | Full app (or diff-scoped) | `Focus on the billing page` |
-| Auth | None | `Sign in to user@example.com`, `Import cookies from cookies.json` |
+When the user types `/sync-gbrain`, run this skill. Argument modes (parsed by
+the skill itself, not a dispatcher binary):
 
-**If no URL is given and you're on a feature branch:** Automatically enter **diff-aware mode** (see Modes below). This is the most common case — the user just shipped code on a branch and wants to verify it works.
+- `/sync-gbrain` — incremental sync (default; mtime fast-path; ~50ms steady-state)
+- `/sync-gbrain --full` — full code reindex via `gbrain reindex-code` (~25-35 min on a big repo)
+- `/sync-gbrain --code-only` — only run the code stage; skip memory + brain-sync
+- `/sync-gbrain --dry-run` — preview what would sync; no writes anywhere
+- `/sync-gbrain --no-memory` / `--no-brain-sync` — selectively skip stages
+- `/sync-gbrain --quiet` — suppress per-stage output
 
-**Find the browse binary:**
+Pass-through args go straight to the orchestrator at
+`~/.claude/skills/bin/gbrain-sync.ts`.
 
-## SETUP (run this check BEFORE any browse command)
+---
+
+## Step 1: State probe
+
+Before doing anything, check that /setup-gbrain has been run on this Mac.
 
 ```bash
-_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
-B=""
-[ -n "$_ROOT" ] && [ -x "$_ROOT/.claude/skills/browse/dist/browse" ] && B="$_ROOT/.claude/skills/browse/dist/browse"
-[ -z "$B" ] && B="$HOME/.claude/skills/browse/dist/browse"
-if [ -x "$B" ]; then
-  echo "READY: $B"
+~/.claude/skills/bin/gbrain-detect 2>/dev/null
+```
+
+**Remote-MCP mode (Path 4 of /setup-gbrain):** if `gbrain_mcp_mode=remote-http`,
+this skill is a graceful no-op. The brain server's own indexing cadence
+handles code import + search refresh; this Mac doesn't run a local gbrain
+CLI to drive `gbrain sources add` / `sync --strategy code`. Print:
+
+> "Remote MCP detected (Path 4). /sync-gbrain is local-mode-only in V1.
+> Your brain server (`<host>` from claude.json) handles indexing on its own
+> cadence. If indexing seems stale, ping your brain admin or trigger a
+> manual sync there. To wire `/sync-gbrain` through MCP tools (when gbrain
+> ships `mcp__gbrain__sources_add` and friends), see the v1.27.0.0+
+> follow-on TODO."
+
+Then exit cleanly. Do NOT proceed to Step 2.
+
+For local-stdio mode and unconfigured states:
+
+If `gbrain_on_path=false` OR `gbrain_config_exists=false` OR CLAUDE.md does
+not contain `## GBrain Configuration (configured by /setup-gbrain)`, STOP and
+tell the user:
+
+> "/sync-gbrain requires /setup-gbrain to be run first. Run `/setup-gbrain` to
+> install gbrain, register the MCP server, and set per-repo trust policy."
+
+Do NOT continue — the skill is unsafe when gbrain isn't configured (we'd
+write a CLAUDE.md guidance block referencing tools that don't exist).
+
+Also check the per-repo trust policy. If `gstack-gbrain-repo-policy get` for
+this repo returns `deny`, STOP:
+
+> "This repo's gbrain trust policy is `deny`. Run `/setup-gbrain --repo` to
+> change it before syncing."
+
+---
+
+## Step 2: Run the orchestrator
+
+Pass user args to the orchestrator. Do not paraphrase them — pass through
+as-is.
+
+```bash
+bun run ~/.claude/skills/bin/gbrain-sync.ts <user-args>
+```
+
+The orchestrator runs three stages: code → memory → brain-sync (per the
+plan's storage tiering). Each stage failure is non-fatal; subsequent stages
+still run. State is persisted to `~/.gstack/.gbrain-sync-state.json` via
+tmp-file + atomic rename. Concurrent runs are blocked by a lock file at
+`~/.gstack/.sync-gbrain.lock` (5-min stale-takeover).
+
+---
+
+## Step 3: Code-index health check
+
+After the sync run, query gbrain for the cwd source's page_count:
+
+```bash
+SOURCE_ID=$(grep -o '"source_id":"[^"]*"' ~/.gstack/.gbrain-sync-state.json 2>/dev/null \
+  | head -1 | sed 's/.*"source_id":"//;s/".*//')
+PAGES=$(gbrain sources list --json 2>/dev/null \
+  | jq -r --arg id "$SOURCE_ID" '.sources[] | select(.id==$id) | .page_count' 2>/dev/null \
+  || echo 0)
+echo "cwd source: $SOURCE_ID, page_count: $PAGES"
+```
+
+If `PAGES` is 0 or empty AND the user did NOT pass `--no-code` AND mode was
+not `--full`, AskUserQuestion via the format in the preamble:
+
+> D1 — This repo has 0 indexed pages in gbrain. Run a full code reindex now?
+>
+> ELI10: gbrain hasn't indexed this repo's code yet. The semantic search
+> tools (`gbrain search`, `code-def`, `code-refs`) will return nothing
+> until we run a full pass. Takes ~25-35 minutes on a big Mac.
+>
+> Recommendation: A — the brain is unusable for code search until indexed,
+> and Step 2 of this skill already verified gbrain is configured correctly.
+>
+> Note: options differ in kind, not coverage — no completeness score.
+>
+> A) Run /sync-gbrain --full now (recommended)
+> B) Skip — I'll run it later
+
+If A: re-invoke the orchestrator with `--full --code-only`.
+If B: continue to Step 4 with the empty-corpus state recorded.
+
+---
+
+## Step 4: Refresh `## GBrain Search Guidance` block in CLAUDE.md
+
+Capability check (per /plan-eng-review §6):
+
+```bash
+SLUG="_capability_check_$$"
+if [ -f ~/.gbrain/config.json ] && \
+   gbrain --version 2>/dev/null | grep -q '^gbrain ' && \
+   echo "ping" | gbrain put "$SLUG" >/dev/null 2>&1 && \
+   gbrain search "ping" 2>/dev/null | grep -q "$SLUG"; then
+  CAPABILITY_OK=1
 else
-  echo "NEEDS_SETUP"
+  CAPABILITY_OK=0
 fi
+gbrain delete "$SLUG" 2>/dev/null || true
 ```
 
-If `NEEDS_SETUP`:
-1. Tell the user: "gstack browse needs a one-time build (~10 seconds). OK to proceed?" Then STOP and wait.
-2. Run: `cd <SKILL_DIR> && ./setup`
-3. If `bun` is not installed:
-   ```bash
-   if ! command -v bun >/dev/null 2>&1; then
-     BUN_VERSION="1.3.10"
-     BUN_INSTALL_SHA="bab8acfb046aac8c72407bdcce903957665d655d7acaa3e11c7c4616beae68dd"
-     tmpfile=$(mktemp)
-     curl -fsSL "https://bun.sh/install" -o "$tmpfile"
-     actual_sha=$(shasum -a 256 "$tmpfile" | awk '{print $1}')
-     if [ "$actual_sha" != "$BUN_INSTALL_SHA" ]; then
-       echo "ERROR: bun install script checksum mismatch" >&2
-       echo "  expected: $BUN_INSTALL_SHA" >&2
-       echo "  got:      $actual_sha" >&2
-       rm "$tmpfile"; exit 1
-     fi
-     BUN_VERSION="$BUN_VERSION" bash "$tmpfile"
-     rm "$tmpfile"
-   fi
-   ```
+Then update CLAUDE.md based on capability state:
 
-**Create output directories:**
+**If `CAPABILITY_OK=1`** — write or update the block. Idempotent: find the
+HTML-comment-delimited block; replace its body if it exists; append at the
+end of CLAUDE.md if it doesn't. NEVER duplicate. Block is machine-AGNOSTIC
+(no engine, no page counts, no last-sync time — those are in the existing
+`## GBrain Configuration` block).
 
-```bash
-REPORT_DIR=".gstack/qa-reports"
-mkdir -p "$REPORT_DIR/screenshots"
+Verbatim block content (copy exactly):
+
+```markdown
+## GBrain Search Guidance (configured by /sync-gbrain)
+<!-- gstack-gbrain-search-guidance:start -->
+
+GBrain is set up and synced on this machine. The agent should prefer gbrain
+over Grep when the question is semantic or when you don't know the exact
+identifier yet. Two indexed corpora available via the `gbrain` CLI:
+- This repo's code (registered as `gstack-code-<repo>` source).
+- `~/.gstack/` curated memory (registered as `gstack-brain-<user>` source via
+  the existing federation pipeline).
+
+Prefer gbrain when:
+- "Where is X handled?" / semantic intent, no exact string yet:
+    `gbrain search "<terms>"` or `gbrain query "<question>"`
+- "Where is symbol Y defined?" / symbol-based code questions:
+    `gbrain code-def <symbol>` or `gbrain code-refs <symbol>`
+- "What calls Y?" / "What does Y depend on?":
+    `gbrain code-callers <symbol>` / `gbrain code-callees <symbol>`
+- "What did we decide last time?" / past plans, retros, learnings:
+    `gbrain search "<terms>" --source gstack-brain-<user>`
+
+Grep is still right for known exact strings, regex, multiline patterns, and
+file globs. The brain auto-syncs incrementally on every gstack skill start.
+Run `/sync-gbrain` to force-refresh, `/sync-gbrain --full` for full reindex.
+
+<!-- gstack-gbrain-search-guidance:end -->
 ```
+
+Use the Read + Edit tools. The find-and-replace target is the entire region
+from `<!-- gstack-gbrain-search-guidance:start -->` through
+`<!-- gstack-gbrain-search-guidance:end -->`. If those markers are missing,
+search for `## GBrain Search Guidance (configured by /sync-gbrain)` heading
+and replace from there to the next `## ` or EOF. If no heading exists, append
+the entire block at the end of CLAUDE.md.
+
+**Atomic write:** write the new CLAUDE.md content to a tmp file alongside it
+(e.g., `CLAUDE.md.sync-gbrain.tmp`) then `mv` to atomic-rename, so a crash
+mid-write never leaves the file half-modified.
+
+**If `CAPABILITY_OK=0`** — REMOVE the block entirely if present. Use the same
+Edit tool to strip the start/end-marker region. The `## GBrain Configuration`
+block stays in place (it's a record of the install, not a capability claim).
+
+Do NOT crash if CLAUDE.md is missing or unwritable — log a warning and
+continue.
 
 ---
 
-## Prior Learnings
+## Step 5: Verdict block (idempotent doctor output)
 
-Search for relevant learnings from previous sessions:
+Print a status block matching `/setup-gbrain` Step 10 conventions. Each row
+is `[OK]/[FIX]/[WARN]/[ERR]`. Reuse `gbrain doctor --json --fast` for
+informational rows but DO NOT gate the guidance block on doctor (per
+/plan-eng-review §6 — doctor is too strict for unrelated reasons).
 
-```bash
-_CROSS_PROJ=$(~/.claude/skills/bin/config get cross_project_learnings 2>/dev/null || echo "unset")
-echo "CROSS_PROJECT: $_CROSS_PROJ"
-if [ "$_CROSS_PROJ" = "true" ]; then
-  ~/.claude/skills/bin/learnings-search --limit 10 --cross-project 2>/dev/null || true
-else
-  ~/.claude/skills/bin/learnings-search --limit 10 2>/dev/null || true
-fi
+```
+gbrain status: GREEN
+
+  CLI ............. OK   <gbrain version>
+  Engine .......... OK   <pglite|supabase>
+  Capability ...... OK   write+search round-trip
+  CWD source ...... OK   <gstack-code-{repo_slug}> (page_count=<N>)
+  ~/.gstack source. OK   <gstack-brain-{user}> (page_count=<N>) — managed by /setup-gbrain
+  Memory sync ..... OK   <artifacts_sync_mode>
+  CLAUDE.md ....... OK   ## GBrain Search Guidance present
+  Last sync ....... OK   <last_sync from state file>
+
+Run `/sync-gbrain` again any time gbrain feels off; safe and idempotent.
 ```
 
-If `CROSS_PROJECT` is `unset` (first time): Use AskUserQuestion:
-
-> gstack can search learnings from your other projects on this machine to find
-> patterns that might apply here. This stays local (no data leaves your machine).
-> Recommended for solo developers. Skip if you work on multiple client codebases
-> where cross-contamination would be a concern.
-
-Options:
-- A) Enable cross-project learnings (recommended)
-- B) Keep learnings project-scoped only
-
-If A: run `~/.claude/skills/bin/config set cross_project_learnings true`
-If B: run `~/.claude/skills/bin/config set cross_project_learnings false`
-
-Then re-run the search with the appropriate flag.
-
-If learnings are found, incorporate them into your analysis. When a review finding
-matches a past learning, display:
-
-**"Prior learning applied: [key] (confidence N/10, from [date])"**
-
-This makes the compounding visible. The user should see that gstack is getting
-smarter on their codebase over time.
-
-## Test Plan Context
-
-Before falling back to git diff heuristics, check for richer test plan sources:
-
-1. **Project-scoped test plans:** Check `~/.gstack/projects/` for recent `*-test-plan-*.md` files for this repo
-   ```bash
-   setopt +o nomatch 2>/dev/null || true  # zsh compat
-   eval "$(~/.claude/skills/bin/slug 2>/dev/null)"
-   ls -t ~/.gstack/projects/$SLUG/*-test-plan-*.md 2>/dev/null | head -1
-   ```
-2. **Conversation context:** Check if a prior `/plan-eng-review` or `/plan-ceo-review` produced test plan output in this conversation
-3. **Use whichever source is richer.** Fall back to git diff analysis only if neither is available.
+If any row is YELLOW or RED, the verdict line says so and the failing rows
+surface a one-line "next action" (e.g., `Capability ...... ERR  capability
+check failed; CLAUDE.md guidance block REMOVED — run /setup-gbrain to repair`).
 
 ---
 
-## Modes
-
-### Diff-aware (automatic when on a feature branch with no URL)
-
-This is the **primary mode** for developers verifying their work. When the user says `/qa` without a URL and the repo is on a feature branch, automatically:
-
-1. **Analyze the branch diff** to understand what changed:
-   ```bash
-   git diff main...HEAD --name-only
-   git log main..HEAD --oneline
-   ```
-
-2. **Identify affected pages/routes** from the changed files:
-   - Controller/route files → which URL paths they serve
-   - View/template/component files → which pages render them
-   - Model/service files → which pages use those models (check controllers that reference them)
-   - CSS/style files → which pages include those stylesheets
-   - API endpoints → test them directly with `$B js "await fetch('/api/...')"`
-   - Static pages (markdown, HTML) → navigate to them directly
-
-   **If no obvious pages/routes are identified from the diff:** Do not skip browser testing. The user invoked /qa because they want browser-based verification. Fall back to Quick mode — navigate to the homepage, follow the top 5 navigation targets, check console for errors, and test any interactive elements found. Backend, config, and infrastructure changes affect app behavior — always verify the app still works.
-
-3. **Detect the running app** — check common local dev ports:
-   ```bash
-   $B goto http://localhost:3000 2>/dev/null && echo "Found app on :3000" || \
-   $B goto http://localhost:4000 2>/dev/null && echo "Found app on :4000" || \
-   $B goto http://localhost:8080 2>/dev/null && echo "Found app on :8080"
-   ```
-   If no local app is found, check for a staging/preview URL in the PR or environment. If nothing works, ask the user for the URL.
-
-4. **Test each affected page/route:**
-   - Navigate to the page
-   - Take a screenshot
-   - Check console for errors
-   - If the change was interactive (forms, buttons, flows), test the interaction end-to-end
-   - Use `snapshot -D` before and after actions to verify the change had the expected effect
-
-5. **Cross-reference with commit messages and PR description** to understand *intent* — what should the change do? Verify it actually does that.
-
-6. **Check TODOS.md** (if it exists) for known bugs or issues related to the changed files. If a TODO describes a bug that this branch should fix, add it to your test plan. If you find a new bug during QA that isn't in TODOS.md, note it in the report.
-
-7. **Report findings** scoped to the branch changes:
-   - "Changes tested: N pages/routes affected by this branch"
-   - For each: does it work? Screenshot evidence.
-   - Any regressions on adjacent pages?
-
-**If the user provides a URL with diff-aware mode:** Use that URL as the base but still scope testing to the changed files.
-
-### Full (default when URL is provided)
-Systematic exploration. Visit every reachable page. Document 5-10 well-evidenced issues. Produce health score. Takes 5-15 minutes depending on app size.
-
-### Quick (`--quick`)
-30-second smoke test. Visit homepage + top 5 navigation targets. Check: page loads? Console errors? Broken links? Produce health score. No detailed issue documentation.
-
-### Regression (`--regression <baseline>`)
-Run full mode, then load `baseline.json` from a previous run. Diff: which issues are fixed? Which are new? What's the score delta? Append regression section to report.
-
----
-
-## Workflow
-
-### Phase 1: Initialize
-
-1. Find browse binary (see Setup above)
-2. Create output directories
-3. Copy report template from `qa/templates/qa-report-template.md` to output dir
-4. Start timer for duration tracking
-
-### Phase 2: Authenticate (if needed)
-
-**If the user specified auth credentials:**
-
-```bash
-$B goto <login-url>
-$B snapshot -i                    # find the login form
-$B fill @e3 "user@example.com"
-$B fill @e4 "[REDACTED]"         # NEVER include real passwords in report
-$B click @e5                      # submit
-$B snapshot -D                    # verify login succeeded
-```
-
-**If the user provided a cookie file:**
-
-```bash
-$B cookie-import cookies.json
-$B goto <target-url>
-```
-
-**If 2FA/OTP is required:** Ask the user for the code and wait.
-
-**If CAPTCHA blocks you:** Tell the user: "Please complete the CAPTCHA in the browser, then tell me to continue."
-
-### Phase 3: Orient
-
-Get a map of the application:
-
-```bash
-$B goto <target-url>
-$B snapshot -i -a -o "$REPORT_DIR/screenshots/initial.png"
-$B links                          # map navigation structure
-$B console --errors               # any errors on landing?
-```
-
-**Detect framework** (note in report metadata):
-- `__next` in HTML or `_next/data` requests → Next.js
-- `csrf-token` meta tag → Rails
-- `wp-content` in URLs → WordPress
-- Client-side routing with no page reloads → SPA
-
-**For SPAs:** The `links` command may return few results because navigation is client-side. Use `snapshot -i` to find nav elements (buttons, menu items) instead.
-
-### Phase 4: Explore
-
-Visit pages systematically. At each page:
-
-```bash
-$B goto <page-url>
-$B snapshot -i -a -o "$REPORT_DIR/screenshots/page-name.png"
-$B console --errors
-```
-
-Then follow the **per-page exploration checklist** (see `qa/references/issue-taxonomy.md`):
-
-1. **Visual scan** — Look at the annotated screenshot for layout issues
-2. **Interactive elements** — Click buttons, links, controls. Do they work?
-3. **Forms** — Fill and submit. Test empty, invalid, edge cases
-4. **Navigation** — Check all paths in and out
-5. **States** — Empty state, loading, error, overflow
-6. **Console** — Any new JS errors after interactions?
-7. **Responsiveness** — Check mobile viewport if relevant:
-   ```bash
-   $B viewport 375x812
-   $B screenshot "$REPORT_DIR/screenshots/page-mobile.png"
-   $B viewport 1280x720
-   ```
-
-**Depth judgment:** Spend more time on core features (homepage, dashboard, checkout, search) and less on secondary pages (about, terms, privacy).
-
-**Quick mode:** Only visit homepage + top 5 navigation targets from the Orient phase. Skip the per-page checklist — just check: loads? Console errors? Broken links visible?
-
-### Phase 5: Document
-
-Document each issue **immediately when found** — don't batch them.
-
-**Two evidence tiers:**
-
-**Interactive bugs** (broken flows, dead buttons, form failures):
-1. Take a screenshot before the action
-2. Perform the action
-3. Take a screenshot showing the result
-4. Use `snapshot -D` to show what changed
-5. Write repro steps referencing screenshots
-
-```bash
-$B screenshot "$REPORT_DIR/screenshots/issue-001-step-1.png"
-$B click @e5
-$B screenshot "$REPORT_DIR/screenshots/issue-001-result.png"
-$B snapshot -D
-```
-
-**Static bugs** (typos, layout issues, missing images):
-1. Take a single annotated screenshot showing the problem
-2. Describe what's wrong
-
-```bash
-$B snapshot -i -a -o "$REPORT_DIR/screenshots/issue-002.png"
-```
-
-**Write each issue to the report immediately** using the template format from `qa/templates/qa-report-template.md`.
-
-### Phase 6: Wrap Up
-
-1. **Compute health score** using the rubric below
-2. **Write "Top 3 Things to Fix"** — the 3 highest-severity issues
-3. **Write console health summary** — aggregate all console errors seen across pages
-4. **Update severity counts** in the summary table
-5. **Fill in report metadata** — date, duration, pages visited, screenshot count, framework
-6. **Save baseline** — write `baseline.json` with:
-   ```json
-   {
-     "date": "YYYY-MM-DD",
-     "url": "<target>",
-     "healthScore": N,
-     "issues": [{ "id": "ISSUE-001", "title": "...", "severity": "...", "category": "..." }],
-     "categoryScores": { "console": N, "links": N, ... }
-   }
-   ```
-
-**Regression mode:** After writing the report, load the baseline file. Compare:
-- Health score delta
-- Issues fixed (in baseline but not current)
-- New issues (in current but not baseline)
-- Append the regression section to the report
-
----
-
-## Health Score Rubric
-
-Compute each category score (0-100), then take the weighted average.
-
-### Console (weight: 15%)
-- 0 errors → 100
-- 1-3 errors → 70
-- 4-10 errors → 40
-- 10+ errors → 10
-
-### Links (weight: 10%)
-- 0 broken → 100
-- Each broken link → -15 (minimum 0)
-
-### Per-Category Scoring (Visual, Functional, UX, Content, Performance, Accessibility)
-Each category starts at 100. Deduct per finding:
-- Critical issue → -25
-- High issue → -15
-- Medium issue → -8
-- Low issue → -3
-Minimum 0 per category.
-
-### Weights
-| Category | Weight |
-|----------|--------|
-| Console | 15% |
-| Links | 10% |
-| Visual | 10% |
-| Functional | 20% |
-| UX | 15% |
-| Performance | 10% |
-| Content | 5% |
-| Accessibility | 15% |
-
-### Final Score
-`score = Σ (category_score × weight)`
-
----
-
-## Framework-Specific Guidance
-
-### Next.js
-- Check console for hydration errors (`Hydration failed`, `Text content did not match`)
-- Monitor `_next/data` requests in network — 404s indicate broken data fetching
-- Test client-side navigation (click links, don't just `goto`) — catches routing issues
-- Check for CLS (Cumulative Layout Shift) on pages with dynamic content
-
-### Rails
-- Check for N+1 query warnings in console (if development mode)
-- Verify CSRF token presence in forms
-- Test Turbo/Stimulus integration — do page transitions work smoothly?
-- Check for flash messages appearing and dismissing correctly
-
-### WordPress
-- Check for plugin conflicts (JS errors from different plugins)
-- Verify admin bar visibility for logged-in users
-- Test REST API endpoints (`/wp-json/`)
-- Check for mixed content warnings (common with WP)
-
-### General SPA (React, Vue, Angular)
-- Use `snapshot -i` for navigation — `links` command misses client-side routes
-- Check for stale state (navigate away and back — does data refresh?)
-- Test browser back/forward — does the app handle history correctly?
-- Check for memory leaks (monitor console after extended use)
-
----
-
-## Important Rules
-
-1. **Repro is everything.** Every issue needs at least one screenshot. No exceptions.
-2. **Verify before documenting.** Retry the issue once to confirm it's reproducible, not a fluke.
-3. **Never include credentials.** Write `[REDACTED]` for passwords in repro steps.
-4. **Write incrementally.** Append each issue to the report as you find it. Don't batch.
-5. **Never read source code.** Test as a user, not a developer.
-6. **Check console after every interaction.** JS errors that don't surface visually are still bugs.
-7. **Test like a user.** Use realistic data. Walk through complete workflows end-to-end.
-8. **Depth over breadth.** 5-10 well-documented issues with evidence > 20 vague descriptions.
-9. **Never delete output files.** Screenshots and reports accumulate — that's intentional.
-10. **Use `snapshot -C` for tricky UIs.** Finds clickable divs that the accessibility tree misses.
-11. **Show screenshots to the user.** After every `$B screenshot`, `$B snapshot -a -o`, or `$B responsive` command, use the Read tool on the output file(s) so the user can see them inline. For `responsive` (3 files), Read all three. This is critical — without it, screenshots are invisible to the user.
-12. **Never refuse to use the browser.** When the user invokes /qa or /qa-only, they are requesting browser-based testing. Never suggest evals, unit tests, or other alternatives as a substitute. Even if the diff appears to have no UI changes, backend changes affect app behavior — always open the browser and test.
-
----
-
-## Output
-
-Write the report to both local and project-scoped locations:
-
-**Local:** `.gstack/qa-reports/qa-report-{domain}-{YYYY-MM-DD}.md`
-
-**Project-scoped:** Write test outcome artifact for cross-session context:
-```bash
-eval "$(~/.claude/skills/bin/slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG
-```
-Write to `~/.gstack/projects/{slug}/{user}-{branch}-test-outcome-{datetime}.md`
-
-### Output Structure
-
-```
-.gstack/qa-reports/
-├── qa-report-{domain}-{YYYY-MM-DD}.md    # Structured report
-├── screenshots/
-│   ├── initial.png                        # Landing page annotated screenshot
-│   ├── issue-001-step-1.png               # Per-issue evidence
-│   ├── issue-001-result.png
-│   └── ...
-└── baseline.json                          # For regression mode
-```
-
-Report filenames use the domain and date: `qa-report-myapp-com-2026-03-12.md`
-
----
-
-## Capture Learnings
-
-If you discovered a non-obvious pattern, pitfall, or architectural insight during
-this session, log it for future sessions:
-
-```bash
-~/.claude/skills/bin/learnings-log '{"skill":"qa-only","type":"TYPE","key":"SHORT_KEY","insight":"DESCRIPTION","confidence":N,"source":"SOURCE","files":["path/to/relevant/file"]}'
-```
-
-**Types:** `pattern` (reusable approach), `pitfall` (what NOT to do), `preference`
-(user stated), `architecture` (structural decision), `tool` (library/framework insight),
-`operational` (project environment/CLI/workflow knowledge).
-
-**Sources:** `observed` (you found this in the code), `user-stated` (user told you),
-`inferred` (AI deduction), `cross-model` (both Claude and Codex agree).
-
-**Confidence:** 1-10. Be honest. An observed pattern you verified in the code is 8-9.
-An inference you're not sure about is 4-5. A user preference they explicitly stated is 10.
-
-**files:** Include the specific file paths this learning references. This enables
-staleness detection: if those files are later deleted, the learning can be flagged.
-
-**Only log genuine discoveries.** Don't log obvious things. Don't log things the user
-already knows. A good test: would this insight save time in a future session? If yes, log it.
-
-## Additional Rules (qa-only specific)
-
-11. **Never fix bugs.** Find and document only. Do not read source code, edit files, or suggest fixes in the report. Your job is to report what's broken, not to fix it. Use `/qa` for the test-fix-verify loop.
-12. **No test framework detected?** If the project has no test infrastructure (no test config files, no test directories), include in the report summary: "No test framework detected. Run `/qa` to bootstrap one and enable regression test generation."
+## Concurrency note
+
+This skill is safe to run concurrently from multiple terminals on the same
+Mac. The orchestrator acquires a lock at `~/.gstack/.sync-gbrain.lock` before
+any state-file or CLAUDE.md mutation and exits with code 2 if another sync is
+in flight. Stale locks (process died) auto-clear after 5 minutes.
+
+## Cross-machine note
+
+The `## GBrain Search Guidance` block is committed to the repo's CLAUDE.md
+and travels with `git push`/`git pull` — NOT through `~/.gstack/.brain-allowlist`
+(which is for `~/.gstack/` brain-sync only). On a different Mac with a synced
+CLAUDE.md but no local gbrain, /sync-gbrain detects the mismatch via the
+capability check and REMOVES the block (the local agent shouldn't be told to
+use a tool that isn't installed).
+
+## Status reporting
+
+End with a Completion Status (per the preamble protocol):
+- **DONE** — all stages green, CLAUDE.md guidance block present, verdict GREEN.
+- **DONE_WITH_CONCERNS** — sync ran but at least one stage failed or capability
+  check failed. List which.
+- **BLOCKED** — could not acquire lock, gbrain not on PATH, or per-repo policy
+  is deny. State the blocker.
+- **NEEDS_CONTEXT** — /setup-gbrain has not been run, or `gbrain doctor` shows
+  a state that requires user decision (e.g., engine migration).
