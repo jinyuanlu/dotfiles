@@ -4,6 +4,9 @@ source "$HOME/.history.sh"
 source "$HOME/.aliases.sh"
 source "$HOME/.mandatory_aliases.sh"
 source "$HOME/.app_env.sh"
+# Sensitive env vars (git-crypt encrypted in dotfiles repo).
+# Sourced after .app_env.sh so secrets can override or augment plaintext defaults.
+[ -r "$HOME/.zsh_secrets.sh" ] && source "$HOME/.zsh_secrets.sh"
 
 # Path to your oh-my-zsh installation.
 export ZSH="$HOME/.oh-my-zsh"
