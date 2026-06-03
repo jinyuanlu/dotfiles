@@ -10,6 +10,16 @@
 
 Requires [bun](https://bun.sh). The browse CLI compiles Playwright into a standalone binary at `~/.claude/skills/browse/dist/browse`.
 
+### Dev clone (git hooks)
+
+After cloning this repo for development, enable the version-controlled hooks once:
+
+```bash
+bin/setup-git-hooks        # sets core.hooksPath = .githooks
+```
+
+This installs a `post-checkout` hook that auto-links the git-crypt key into new worktrees, so `git worktree add` yields a clean, decrypted tree with no manual symlinking. (git-crypt 0.8.0 only finds its key in the common git-dir, not in worktree git-dirs.)
+
 ### How it works
 
 ```
