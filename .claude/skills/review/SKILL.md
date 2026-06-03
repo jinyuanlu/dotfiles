@@ -2,11 +2,7 @@
 name: review
 preamble-tier: 4
 version: 1.0.0
-description: |
-  Pre-landing PR review. Analyzes diff against the base branch for SQL safety, LLM trust
-  boundary violations, conditional side effects, and other structural issues. Use when
-  asked to "review this PR", "code review", "pre-landing review", or "check my diff".
-  Proactively suggest when the user is about to merge or land code changes. (gstack)
+description: Pre-landing PR review. (gstack)
 allowed-tools:
   - Bash
   - Read
@@ -25,6 +21,14 @@ triggers:
 ---
 <!-- AUTO-GENERATED from SKILL.md.tmpl — do not edit directly -->
 <!-- Regenerate: bun run gen:skill-docs -->
+
+
+## When to invoke this skill
+
+Analyzes diff against the base branch for SQL safety, LLM trust
+boundary violations, conditional side effects, and other structural issues. Use when
+asked to "review this PR", "code review", "pre-landing review", or "check my diff".
+Proactively suggest when the user is about to merge or land code changes.
 
 ## Preamble (run first)
 
@@ -103,6 +107,19 @@ _CHECKPOINT_MODE=$(~/.claude/skills/bin/config get checkpoint_mode 2>/dev/null |
 _CHECKPOINT_PUSH=$(~/.claude/skills/bin/config get checkpoint_push 2>/dev/null || echo "false")
 echo "CHECKPOINT_MODE: $_CHECKPOINT_MODE"
 echo "CHECKPOINT_PUSH: $_CHECKPOINT_PUSH"
+# Plan-mode hint for skills like /spec that branch behavior on plan-mode state.
+# Claude Code exposes plan mode via system reminders; we detect best-effort
+# from CLAUDE_PLAN_FILE (set by the harness when plan mode is active) and
+# fall back to "inactive". Codex hosts and Claude execution mode both end up
+# inactive, which is the safe default (defaults to file+execute pipeline).
+if [ -n "${CLAUDE_PLAN_FILE:-}${GSTACK_PLAN_MODE_FORCE:-}" ]; then
+  export GSTACK_PLAN_MODE="active"
+elif [ "${GSTACK_PLAN_MODE:-}" = "active" ]; then
+  export GSTACK_PLAN_MODE="active"
+else
+  export GSTACK_PLAN_MODE="inactive"
+fi
+echo "GSTACK_PLAN_MODE: $GSTACK_PLAN_MODE"
 [ -n "$OPENCLAW_SESSION" ] && echo "SPAWNED_SESSION: true" || true
 ```
 
@@ -112,7 +129,7 @@ In plan mode, allowed because they inform the plan: `$B`, `$D`, `codex exec`/`co
 
 ## Skill Invocation During Plan Mode
 
-If the user invokes a skill in plan mode, the skill takes precedence over generic plan mode behavior. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; the first AskUserQuestion is the workflow entering plan mode, not a violation of it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If no variant is callable, fall back to writing the decision brief into the plan file as a `## Decisions to confirm` section + ExitPlanMode — never silently auto-decide. At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" execute. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
+If the user invokes a skill in plan mode, the skill takes precedence over generic plan mode behavior. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; the first AskUserQuestion is the workflow entering plan mode, not a violation of it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If no variant is callable, the skill is BLOCKED — stop and report `BLOCKED — AskUserQuestion unavailable` per the AskUserQuestion Format rule. At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" execute. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
 
 If `PROACTIVE` is `"false"`, do not auto-invoke or proactively suggest skills. If a skill seems useful, ask: "I think /skillname might help here — want me to run it?"
 
@@ -234,6 +251,7 @@ Key routing rules:
 - Ship/deploy/PR → invoke /ship or /land-and-deploy
 - Save progress → invoke /context-save
 - Resume context → invoke /context-restore
+- Author a backlog-ready spec/issue → invoke /spec
 ```
 
 Then commit the change: `git add CLAUDE.md && git commit -m "chore: add gstack skill routing rules to CLAUDE.md"`
@@ -283,7 +301,7 @@ AI orchestrator (e.g., OpenClaw). In spawned sessions:
 
 **Rule:** if any `mcp__*__AskUserQuestion` variant is in your tool list, prefer it. Hosts may disable native AUQ via `--disallowedTools AskUserQuestion` (Conductor does, by default) and route through their MCP variant; calling native there silently fails. Same questions/options shape; same decision-brief format applies.
 
-**Fallback when neither variant is callable:** in plan mode, write the decision brief into the plan file as a `## Decisions to confirm` section + ExitPlanMode (the native "Ready to execute?" surfaces it). Outside plan mode, output the brief as prose and stop. **Never silently auto-decide** — only `/plan-tune` AUTO_DECIDE opt-ins authorize auto-picking.
+**If no AskUserQuestion variant appears in your tool list, this skill is BLOCKED.** Stop, report `BLOCKED — AskUserQuestion unavailable`, and wait for the user. Do not write decisions to the plan file as a substitute, do not emit them as prose and stop, and do not silently auto-decide (only `/plan-tune` AUTO_DECIDE opt-ins authorize auto-picking).
 
 ### Format
 
@@ -320,6 +338,55 @@ Effort both-scales: when an option involves effort, label both human-team and CC
 
 Net line closes the tradeoff. Per-skill instructions may add stricter rules.
 
+### Handling 5+ options — split, never drop
+
+AskUserQuestion caps every call at **4 options**. With 5+ real options, NEVER
+drop, merge, or silently defer one to fit. Pick a compliant shape:
+
+- **Batch into ≤4-groups** — for coherent alternatives (e.g. version bumps,
+  layout variants). One call, 5th surfaced only if first 4 don't fit.
+- **Split per-option** — for independent scope items (e.g. "ship E1..E6?").
+  Fire N sequential calls, one per option. Default to this when unsure.
+
+Per-option call shape: `D<N>.k` header (e.g. D3.1..D3.5), ELI10 per option,
+Recommendation, kind-note (no completeness score — Include/Defer/Cut/Hold are
+decision actions), and 4 buckets:
+**A) Include**, **B) Defer**, **C) Cut**, **D) Hold** (stop chain, discuss).
+
+After the chain, fire `D<N>.final` to validate the assembled set (reprompt
+dependency conflicts) and confirm shipping it. Use `D<N>.revise-<k>` to
+revise one option without re-running the chain.
+
+For N>6, fire a `D<N>.0` meta-AskUserQuestion first (proceed / narrow / batch).
+
+question_ids for split chains: `<skill>-split-<option-slug>` (kebab-case ASCII,
+≤64 chars, `-2`/`-3` suffix on collision). The runtime checker
+(`bin/gstack-question-preference`) refuses `never-ask` on any `*-split-*` id,
+so split chains are never AUTO_DECIDE-eligible — the user's option set is sacred.
+
+**Full rule + worked examples + Hold/dependency semantics:** see
+`docs/askuserquestion-split.md` in the gstack repo. Read on demand when N>4.
+
+**Non-ASCII characters — write directly, never \u-escape.** When any
+    string field (question, option label, option description) contains
+    Chinese (繁體/簡體), Japanese, Korean, or other non-ASCII text, emit
+    the literal UTF-8 characters in the JSON string. **Never escape them
+    as `\uXXXX`.** Claude Code's tool parameter pipe is UTF-8 native
+    and passes characters through unchanged. Manually escaping requires
+    recalling each codepoint from training, which is unreliable for long
+    CJK strings — the model regularly emits the wrong codepoint (e.g.
+    writes `\u3103` thinking it is 管 U+7BA1, but `\u3103` is
+    actually ㄃, so the user sees `管理工具` rendered as `㄃3用箱`).
+    The trigger is long, multi-line questions with hundreds of CJK
+    characters: that is exactly when reflexive escaping kicks in and
+    exactly when miscoding is most damaging. Long ≠ escape. Keep
+    characters literal.
+
+    Wrong: `"question": "請選擇\uXXXX\uXXXX\uXXXX\uXXXX"`
+    Right: `"question": "請選擇管理工具"`
+
+    Only JSON-mandatory escapes remain allowed: `\n`, `\t`, `\"`, `\\`.
+
 ### Self-check before emitting
 
 Before calling AskUserQuestion, verify:
@@ -332,6 +399,10 @@ Before calling AskUserQuestion, verify:
 - [ ] Dual-scale effort labels on effort-bearing options (human / CC)
 - [ ] Net line closes the decision
 - [ ] You are calling the tool, not writing prose
+- [ ] Non-ASCII characters (CJK / accents) written directly, NOT \u-escaped
+- [ ] If you had 5+ options, you split (or batched into ≤4-groups) — did NOT drop any
+- [ ] If you split, you checked dependencies between options before firing the chain
+- [ ] If a per-option Hold fires, you stopped the chain immediately (didn't queue)
 
 
 ## Artifacts Sync (skill start)
@@ -349,30 +420,29 @@ _BRAIN_SYNC_BIN="~/.claude/skills/bin/brain-sync"
 _BRAIN_CONFIG_BIN="~/.claude/skills/bin/config"
 
 # /sync-gbrain context-load: teach the agent to use gbrain when it's available.
-# Mutually exclusive variants per /plan-eng-review §4. Empty string when gbrain
-# is not configured (zero context cost for non-gbrain users).
+# Per-worktree pin: post-spike redesign uses kubectl-style `.gbrain-source` in the
+# git toplevel to scope queries. Look for the pin in the worktree (not a global
+# state file) so that opening worktree B without a pin doesn't claim "indexed"
+# just because worktree A was synced. Empty string when gbrain is not
+# configured (zero context cost for non-gbrain users).
 _GBRAIN_CONFIG="$HOME/.gbrain/config.json"
 if [ -f "$_GBRAIN_CONFIG" ] && command -v gbrain >/dev/null 2>&1; then
   _GBRAIN_VERSION_OK=$(gbrain --version 2>/dev/null | grep -c '^gbrain ' || echo 0)
   if [ "$_GBRAIN_VERSION_OK" -gt 0 ] 2>/dev/null; then
-    _SYNC_STATE="$_GSTACK_HOME/.gbrain-sync-state.json"
-    _CWD_PAGES=0
-    if [ -f "$_SYNC_STATE" ]; then
-      # Flatten newlines so the regex works against pretty-printed JSON too.
-      _CWD_PAGES=$(tr -d '\n' < "$_SYNC_STATE" 2>/dev/null \
-        | grep -o '"name": *"code"[^}]*"detail": *{[^}]*"page_count": *[0-9]*' \
-        | grep -o '"page_count": *[0-9]*' | grep -o '[0-9]\+' | head -1)
-      _CWD_PAGES=${_CWD_PAGES:-0}
+    _GBRAIN_PIN_PATH=""
+    _REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+    if [ -n "$_REPO_TOP" ] && [ -f "$_REPO_TOP/.gbrain-source" ]; then
+      _GBRAIN_PIN_PATH="$_REPO_TOP/.gbrain-source"
     fi
-    if [ "$_CWD_PAGES" -gt 0 ] 2>/dev/null; then
+    if [ -n "$_GBRAIN_PIN_PATH" ]; then
       echo "GBrain configured. Prefer \`gbrain search\`/\`gbrain query\` over Grep for"
       echo "semantic questions; use \`gbrain code-def\`/\`code-refs\`/\`code-callers\` for"
       echo "symbol-aware code lookup. See \"## GBrain Search Guidance\" in CLAUDE.md."
       echo "Run /sync-gbrain to refresh."
     else
-      echo "GBrain configured but this repo isn't indexed yet. Run \`/sync-gbrain --full\`"
-      echo "before relying on \`gbrain search\` for code questions in this repo."
-      echo "Falls back to Grep until indexed."
+      echo "GBrain configured but this worktree isn't pinned yet. Run \`/sync-gbrain --full\`"
+      echo "before relying on \`gbrain search\` for code questions in this worktree."
+      echo "Falls back to Grep until pinned."
     fi
   fi
 fi
@@ -532,84 +602,7 @@ Applies to AskUserQuestion, user replies, and findings. AskUserQuestion Format i
 - User-turn override wins: if the current message asks for terse / no explanations / just the answer, skip this section.
 - Terse mode (EXPLAIN_LEVEL: terse): no glosses, no outcome-framing layer, shorter responses.
 
-Jargon list, gloss on first use if the term appears:
-- idempotent
-- idempotency
-- race condition
-- deadlock
-- cyclomatic complexity
-- N+1
-- N+1 query
-- backpressure
-- memoization
-- eventual consistency
-- CAP theorem
-- CORS
-- CSRF
-- XSS
-- SQL injection
-- prompt injection
-- DDoS
-- rate limit
-- throttle
-- circuit breaker
-- load balancer
-- reverse proxy
-- SSR
-- CSR
-- hydration
-- tree-shaking
-- bundle splitting
-- code splitting
-- hot reload
-- tombstone
-- soft delete
-- cascade delete
-- foreign key
-- composite index
-- covering index
-- OLTP
-- OLAP
-- sharding
-- replication lag
-- quorum
-- two-phase commit
-- saga
-- outbox pattern
-- inbox pattern
-- optimistic locking
-- pessimistic locking
-- thundering herd
-- cache stampede
-- bloom filter
-- consistent hashing
-- virtual DOM
-- reconciliation
-- closure
-- hoisting
-- tail call
-- GIL
-- zero-copy
-- mmap
-- cold start
-- warm start
-- green-blue deploy
-- canary deploy
-- feature flag
-- kill switch
-- dead letter queue
-- fan-out
-- fan-in
-- debounce
-- throttle (UI)
-- hydration mismatch
-- memory leak
-- GC pause
-- heap fragmentation
-- stack overflow
-- null pointer
-- dangling pointer
-- buffer overflow
+Curated jargon list lives at `~/.claude/skills/scripts/jargon-list.json` (80+ terms). On the first jargon term you encounter this session, Read that file once; treat the `terms` array as the canonical list. The list is repo-owned and may grow between releases.
 
 
 ## Completeness Principle — Boil the Lake
@@ -657,7 +650,11 @@ If you are looping on the same diagnostic, same file, or failed fix variants, ST
 
 Before each AskUserQuestion, choose `question_id` from `scripts/question-registry.ts` or `{skill}-{slug}`, then run `~/.claude/skills/bin/question-preference --check "<id>"`. `AUTO_DECIDE` means choose the recommended option and say "Auto-decided [summary] → [option] (your preference). Change with /plan-tune." `ASK_NORMALLY` means ask.
 
-After answer, log best-effort:
+**Embed the question_id as a marker in the question text** so hooks can identify it deterministically (plan-tune cathedral T14 / D18 progressive markers). Append `<gstack-qid:{question_id}>` somewhere in the rendered question (the leading line or trailing line is fine; the marker doesn't render visibly to the user when wrapped in HTML-style angle brackets, but the hook strips it). Without the marker the PreToolUse enforcement hook treats the AUQ as observed-only and never auto-decides — so always include it when the question matches a registered `question_id`.
+
+**Embed the option recommendation via the `(recommended)` label suffix** on exactly one option per AUQ. The PreToolUse hook parses `(recommended)` first, falls back to "Recommendation: X" prose, and refuses to auto-decide if ambiguous. Two `(recommended)` labels = refuse.
+
+After answer, log best-effort (PostToolUse hook also captures deterministically when installed; dedup on (source, tool_use_id) handles double-writes):
 ```bash
 ~/.claude/skills/bin/question-log '{"skill":"review","question_id":"<id>","question_summary":"<short>","category":"<approval|clarification|routing|cherry-pick|feedback-loop>","door_type":"<one-way|two-way>","options_count":N,"user_choice":"<key>","recommended":"<key>","session_id":"'"$_SESSION_ID"'"}' 2>/dev/null || true
 ```
@@ -742,9 +739,7 @@ Replace `SKILL_NAME`, `OUTCOME`, and `USED_BROWSE` before running.
 
 ## Plan Status Footer
 
-In plan mode before ExitPlanMode: if the plan file lacks `## GSTACK REVIEW REPORT`, run `~/.claude/skills/bin/review-read` and append the standard runs/status/findings table. With `NO_REVIEWS` or empty, append a 5-row placeholder with verdict "NO REVIEWS YET — run `/autoplan`". If a richer report exists, skip.
-
-PLAN MODE EXCEPTION — always allowed (it's the plan file).
+Skills that run plan reviews (`/plan-*-review`, `/codex review`) include the EXIT PLAN MODE GATE blocking checklist at the end of the skill, which verifies the plan file ends with `## GSTACK REVIEW REPORT` before ExitPlanMode is called. Skills that don't run plan reviews (operational skills like `/ship`, `/qa`, `/review`) typically don't operate in plan mode and have no review report to verify; this footer is a no-op for them. Writing the plan file is the one edit allowed in plan mode.
 
 ## Step 0: Detect platform and base branch
 
@@ -795,7 +790,7 @@ You are running the `/review` workflow. Analyze the current branch's diff agains
 
 1. Run `git branch --show-current` to get the current branch.
 2. If on the base branch, output: **"Nothing to review — you're on the base branch or have no changes against it."** and stop.
-3. Run `git fetch origin <base> --quiet && git diff origin/<base> --stat` to check if there's a diff. If no diff, output the same message and stop.
+3. Run `git fetch origin <base> --quiet && DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE" --stat` to check if there's a diff. If no diff, output the same message and stop.
 
 ---
 
@@ -807,7 +802,7 @@ Before reviewing code quality, check: **did they build what was requested — no
    Read commit messages (`git log origin/<base>..HEAD --oneline`).
    **If no PR exists:** rely on commit messages and TODOS.md for stated intent — this is the common case since /review runs before /ship creates the PR.
 2. Identify the **stated intent** — what was this branch supposed to accomplish?
-3. Run `git diff origin/<base>...HEAD --stat` and compare the files changed against the stated intent.
+3. Run `DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE" --stat` and compare the files changed against the stated intent.
 
 4. Evaluate with skepticism (incorporating plan completion results if available from an earlier step or adjacent section):
 
@@ -890,19 +885,43 @@ For each item, note:
 - The item text (verbatim or concise summary)
 - Its category: CODE | TEST | MIGRATION | CONFIG | DOCS
 
+### Verification Mode
+
+Before judging completion, classify HOW each item can be verified. The diff alone cannot prove every kind of work. Items outside the current repo or system are structurally invisible to `git diff`.
+
+- **DIFF-VERIFIABLE** — A code change in this repo would manifest in `git diff <base>...HEAD`. Examples: "add UserService" (file appears), "validate input X" (validation logic appears), "create users table" (migration file appears).
+- **CROSS-REPO** — Item names a file or change in a sibling repo (e.g., `domain-hq/docs/dashboard.md`, `~/Development/<other-repo>/...`). The current diff CANNOT prove this.
+- **EXTERNAL-STATE** — Item names state in an external system: Supabase config/RLS, Cloudflare DNS, Vercel env vars, OAuth provider allowlists, third-party SaaS, DNS records. The current diff CANNOT prove this.
+- **CONTENT-SHAPE** — Item requires a file to follow a specific convention. If the file is in this repo: diff-verifiable. If in another repo or system: see CROSS-REPO / EXTERNAL-STATE.
+
+**Verification dispatch:**
+
+- **DIFF-VERIFIABLE** → cross-reference against diff (next section).
+- **CROSS-REPO** → if the sibling repo is reachable on disk (try `~/Development/<repo>/`, `~/code/<repo>/`, the parent of the current repo), run `[ -f <path> ]` to check file existence. File exists → DONE (cite path). File missing → NOT DONE (cite path). Path unreachable → UNVERIFIABLE (cite what needs manual check).
+- **EXTERNAL-STATE** → UNVERIFIABLE. Cite the system and the specific check the user must perform.
+- **CONTENT-SHAPE in another repo** → if the file exists, run any project-detected validator (see "Validator detection" below) before falling back to UNVERIFIABLE. With a validator: pass → DONE; fail → NOT DONE (cite validator output). No validator available: classify UNVERIFIABLE and cite both the file path and the convention to confirm.
+
+**Path concreteness rule.** If a plan item names a *concrete filesystem path* (absolute, `~/...`, or `<sibling-repo>/<file>`), it MUST be classified DONE or NOT DONE based on `[ -f <path> ]`. UNVERIFIABLE is only valid when the path is genuinely abstract ("Cloudflare DNS", "Supabase allowlist") or the sibling root is unreachable on this machine. "I don't want to check" is not unreachable.
+
+**Validator detection.** Before falling back to UNVERIFIABLE on a CONTENT-SHAPE item, scan the target repo's `package.json` for any script matching `validate-*`, `lint-wiki`, `check-docs`, or similar. If found, invoke it with the relevant path argument (e.g., `npm run validate-wiki -- <path>`). For multi-target validators (e.g., `validate-wiki --all`), run once and reconcile per-item from the output. A passing validator promotes the item from UNVERIFIABLE to DONE; a failing one demotes to NOT DONE.
+
+**Honesty rule.** Do NOT classify an item as DONE just because related code shipped. Code that *handles* a deliverable is not the deliverable. Shipping a markdown-extraction library is not the same as shipping the markdown file. When in doubt between DONE and UNVERIFIABLE, prefer UNVERIFIABLE — better to surface a confirmation prompt than silently miss a deliverable.
+
 ### Cross-Reference Against Diff
 
 Run `git diff origin/<base>...HEAD` and `git log origin/<base>..HEAD --oneline` to understand what was implemented.
 
-For each extracted plan item, check the diff and classify:
+For each extracted plan item, run the verification dispatch from the previous section, then classify:
 
-- **DONE** — Clear evidence in the diff that this item was implemented. Cite the specific file(s) changed.
-- **PARTIAL** — Some work toward this item exists in the diff but it's incomplete (e.g., model created but controller missing, function exists but edge cases not handled).
-- **NOT DONE** — No evidence in the diff that this item was addressed.
+- **DONE** — Clear evidence the item shipped. Cite the specific file(s) changed in the diff for DIFF-VERIFIABLE items, or the verified path that exists for CROSS-REPO items with a reachable sibling repo.
+- **PARTIAL** — Some work toward this item exists but is incomplete (e.g., model created but controller missing, function exists but edge cases not handled).
+- **NOT DONE** — Verification ran and produced negative evidence (file missing, code absent in diff, sibling-repo file confirmed absent).
 - **CHANGED** — The item was implemented using a different approach than the plan described, but the same goal is achieved. Note the difference.
+- **UNVERIFIABLE** — The diff and any reachable sibling-repo checks cannot prove or disprove this. Always applies to EXTERNAL-STATE items and to CROSS-REPO items where the sibling repo isn't reachable. Cite the specific manual verification the user must perform (e.g., "check Cloudflare DNS shows DNS-only mode for dashboard.example.com", "confirm /docs/dashboard.md exists in domain-hq repo").
 
-**Be conservative with DONE** — require clear evidence in the diff. A file being touched is not enough; the specific functionality described must be present.
+**Be conservative with DONE** — require clear evidence. A file being touched is not enough; the specific functionality described must be present.
 **Be generous with CHANGED** — if the goal is met by different means, that counts as addressed.
+**Be honest with UNVERIFIABLE** — better to surface 5 items the user must manually confirm than silently classify them DONE.
 
 ### Output Format
 
@@ -912,20 +931,25 @@ PLAN COMPLETION AUDIT
 Plan: {plan file path}
 
 ## Implementation Items
-  [DONE]      Create UserService — src/services/user_service.rb (+142 lines)
-  [PARTIAL]   Add validation — model validates but missing controller checks
-  [NOT DONE]  Add caching layer — no cache-related changes in diff
-  [CHANGED]   "Redis queue" → implemented with Sidekiq instead
+  [DONE]         Create UserService — src/services/user_service.rb (+142 lines)
+  [PARTIAL]      Add validation — model validates but missing controller checks
+  [NOT DONE]     Add caching layer — no cache-related changes in diff
+  [CHANGED]      "Redis queue" → implemented with Sidekiq instead
 
 ## Test Items
-  [DONE]      Unit tests for UserService — test/services/user_service_test.rb
-  [NOT DONE]  E2E test for signup flow
+  [DONE]         Unit tests for UserService — test/services/user_service_test.rb
+  [NOT DONE]    E2E test for signup flow
 
 ## Migration Items
-  [DONE]      Create users table — db/migrate/20240315_create_users.rb
+  [DONE]         Create users table — db/migrate/20240315_create_users.rb
+
+## Cross-Repo / External Items
+  [DONE]         sibling-repo has /docs/dashboard.md — verified at ~/Development/sibling-repo/docs/dashboard.md
+  [UNVERIFIABLE] Cloudflare DNS-only on api.example.com — external system, manual check required
+  [UNVERIFIABLE] Supabase auth allowlist contains user email — external system, confirm in Supabase dashboard
 
 ─────────────────────────────────
-COMPLETION: 4/7 DONE, 1 PARTIAL, 1 NOT DONE, 1 CHANGED
+COMPLETION: 5/9 DONE, 1 PARTIAL, 1 NOT DONE, 1 CHANGED, 2 UNVERIFIABLE
 ─────────────────────────────────
 ```
 
@@ -1033,7 +1057,14 @@ Fetch the latest base branch to avoid false positives from stale local state:
 git fetch origin <base> --quiet
 ```
 
-Run `git diff origin/<base>` to get the full diff. This includes both committed and uncommitted changes against the latest base branch.
+Compute the merge base, then diff the working tree against that point:
+
+```bash
+DIFF_BASE=$(git merge-base origin/<base> HEAD)
+git diff "$DIFF_BASE"
+```
+
+This includes both committed and uncommitted changes while excluding commits that landed on the base branch after this branch was created.
 
 ## Step 3.4: Workspace-aware queue status (advisory)
 
@@ -1148,6 +1179,43 @@ Example:
 \`[P1] (confidence: 9/10) app/models/user.rb:42 — SQL injection via string interpolation in where clause\`
 \`[P2] (confidence: 5/10) app/controllers/api/v1/users_controller.rb:18 — Possible N+1 query, verify with production logs\`
 
+### Pre-emit verification gate (#1539 — kills the "field doesn't exist" FP class)
+
+Before any finding is promoted to the report, the gate requires:
+
+1. **Quote the specific code line that motivates the finding** — file:line plus
+   the verbatim text of the line(s) that triggered it. If the finding is "field
+   X doesn't exist on model Y", quote the lines of class Y where the field
+   would live. If "dict.get() might return None", quote the dict initialization.
+   If "race condition between A and B", quote both A and B.
+
+2. **If you cannot quote the motivating line(s), the finding is unverified.**
+   Force its confidence to 4-5 (suppressed from the main report). It still goes
+   into the appendix so reviewers can audit calibration, but the user does NOT
+   see it in the critical-pass output. Do not work around this by inventing
+   speculative confidence 7+ — that defeats the gate.
+
+**Framework-meta nudge:** When the symbol is generated by a framework
+metaclass, descriptor, ORM Meta inner-class, or migration history (Django
+`Meta`, Rails `has_many`/`scope`, SQLAlchemy `relationship`/`Column`,
+TypeORM decorators, Sequelize `init`/`belongsTo`, Prisma generated client),
+quote the meta-construct (the `Meta` block, the migration, the decorator,
+the schema file) instead of expecting the literal name in the class body.
+The verification is "I read the source that creates this symbol", not "I
+grep'd for the name and didn't find it." Deeper framework-aware verification
+(model introspection, migration-history-aware checks, ORM dialect detection)
+is deliberately out of scope for the lighter gate — see the deferred
+`~/.gstack-dev/plans/1539-framework-aware-review.md` design doc.
+
+The FP classes the gate kills (measured against Django Sprint 2.5 #1539):
+
+| FP class | Why the gate catches it |
+|---|---|
+| "field doesn't exist on model" | Requires quoting the model class body or Meta; the field's absence becomes obvious |
+| "dict.get() might be None" | Requires quoting the dict initialization (e.g. Django form's `cleaned_data` is `{}`-initialized) |
+| "save() might lose fields" | Requires quoting the ORM signature or model definition |
+| "update_fields might miss X" | Requires quoting the field set; if X doesn't exist, the FP is self-evident |
+
 **Calibration learning:** If you report a finding with confidence < 7 and the user
 confirms it IS a real issue, that is a calibration event. Your initial confidence was
 too low. Log the corrected pattern as a learning so future reviews catch it with
@@ -1169,8 +1237,9 @@ STACK=""
 [ -f go.mod ] && STACK="${STACK}go "
 [ -f Cargo.toml ] && STACK="${STACK}rust "
 echo "STACK: ${STACK:-unknown}"
-DIFF_INS=$(git diff origin/<base> --stat | tail -1 | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
-DIFF_DEL=$(git diff origin/<base> --stat | tail -1 | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
+DIFF_BASE=$(git merge-base origin/<base> HEAD)
+DIFF_INS=$(git diff "$DIFF_BASE" --stat | tail -1 | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
+DIFF_DEL=$(git diff "$DIFF_BASE" --stat | tail -1 | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
 DIFF_LINES=$((DIFF_INS + DIFF_DEL))
 echo "DIFF_LINES: $DIFF_LINES"
 # Detect test framework for specialist test stub generation
@@ -1244,7 +1313,7 @@ If learnings are found, include them: "Past learnings for this domain: {learning
 4. Instructions:
 
 "You are a specialist code reviewer. Read the checklist below, then run
-`git diff origin/<base>` to get the full diff. Apply the checklist against the diff.
+`DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"` to get the full diff. Apply the checklist against the diff.
 
 For each finding, output a JSON object on its own line:
 {\"severity\":\"CRITICAL|INFORMATIONAL\",\"confidence\":N,\"path\":\"file\",\"line\":N,\"category\":\"category\",\"summary\":\"description\",\"fix\":\"recommended fix\",\"fingerprint\":\"path:line:category\",\"specialist\":\"name\"}
@@ -1347,7 +1416,7 @@ The Red Team subagent receives:
 
 Prompt: "You are a red team reviewer. The code has already been reviewed by N specialists
 who found the following issues: {merged findings summary}. Your job is to find what they
-MISSED. Read the checklist, run `git diff origin/<base>`, and look for gaps.
+MISSED. Read the checklist, run `DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"`, and look for gaps.
 Output findings as JSON objects (same schema as the specialists). Focus on cross-cutting
 concerns, integration boundary issues, and failure modes that specialist checklists
 don't cover."
@@ -1519,10 +1588,11 @@ Every diff gets adversarial review from both Claude and Codex. LOC is not a prox
 **Detect diff size and tool availability:**
 
 ```bash
-DIFF_INS=$(git diff origin/<base> --stat | tail -1 | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
-DIFF_DEL=$(git diff origin/<base> --stat | tail -1 | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
+DIFF_BASE=$(git merge-base origin/<base> HEAD)
+DIFF_INS=$(git diff "$DIFF_BASE" --stat | tail -1 | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
+DIFF_DEL=$(git diff "$DIFF_BASE" --stat | tail -1 | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
 DIFF_TOTAL=$((DIFF_INS + DIFF_DEL))
-which codex 2>/dev/null && echo "CODEX_AVAILABLE" || echo "CODEX_NOT_AVAILABLE"
+command -v codex >/dev/null 2>&1 && echo "CODEX_AVAILABLE" || echo "CODEX_NOT_AVAILABLE"
 # Legacy opt-out — only gates Codex passes, Claude always runs
 OLD_CFG=$(~/.claude/skills/bin/config get codex_reviews 2>/dev/null || true)
 echo "DIFF_SIZE: $DIFF_TOTAL"
@@ -1540,7 +1610,7 @@ If `OLD_CFG` is `disabled`: skip Codex passes only. Claude adversarial subagent 
 Dispatch via the Agent tool. The subagent has fresh context — no checklist bias from the structured review. This genuine independence catches things the primary reviewer is blind to.
 
 Subagent prompt:
-"Read the diff for this branch with `git diff origin/<base>`. Think like an attacker and a chaos engineer. Your job is to find ways this code will fail in production. Look for: edge cases, race conditions, security holes, resource leaks, failure modes, silent data corruption, logic errors that produce wrong results silently, error handling that swallows failures, and trust boundary violations. Be adversarial. Be thorough. No compliments — just the problems. For each finding, classify as FIXABLE (you know how to fix it) or INVESTIGATE (needs human judgment). After listing findings, end your output with ONE line in the canonical format `Recommendation: <action> because <one-line reason naming the most exploitable finding>` — examples: `Recommendation: Fix the unbounded retry at queue.ts:78 because it'll DoS the worker pool under sustained 429s` or `Recommendation: Ship as-is because the strongest finding is a theoretical race that requires conditions we can't trigger in production`. The reason must point to a specific finding (or no-fix rationale). Generic reasons like 'because it's safer' do not qualify."
+"Read the diff for this branch with `DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"`. Think like an attacker and a chaos engineer. Your job is to find ways this code will fail in production. Look for: edge cases, race conditions, security holes, resource leaks, failure modes, silent data corruption, logic errors that produce wrong results silently, error handling that swallows failures, and trust boundary violations. Be adversarial. Be thorough. No compliments — just the problems. For each finding, classify as FIXABLE (you know how to fix it) or INVESTIGATE (needs human judgment). After listing findings, end your output with ONE line in the canonical format `Recommendation: <action> because <one-line reason naming the most exploitable finding>` — examples: `Recommendation: Fix the unbounded retry at queue.ts:78 because it'll DoS the worker pool under sustained 429s` or `Recommendation: Ship as-is because the strongest finding is a theoretical race that requires conditions we can't trigger in production`. The reason must point to a specific finding (or no-fix rationale). Generic reasons like 'because it's safer' do not qualify."
 
 Present findings under an `ADVERSARIAL REVIEW (Claude subagent):` header. **FIXABLE findings** flow into the same Fix-First pipeline as the structured review. **INVESTIGATE findings** are presented as informational.
 
@@ -1555,7 +1625,7 @@ If Codex is available AND `OLD_CFG` is NOT `disabled`:
 ```bash
 TMPERR_ADV=$(mktemp /tmp/codex-adv-XXXXXXXX)
 _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
-codex exec "IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are Claude Code skill definitions meant for a different AI system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.\n\nReview the changes on this branch against the base branch. Run git diff origin/<base> to see the diff. Your job is to find ways this code will fail in production. Think like an attacker and a chaos engineer. Find edge cases, race conditions, security holes, resource leaks, failure modes, and silent data corruption paths. Be adversarial. Be thorough. No compliments — just the problems. End your output with ONE line in the canonical format `Recommendation: <action> because <one-line reason naming the most exploitable finding>`. Generic reasons like 'because it's safer' do not qualify; the reason must point to a specific finding or no-fix rationale." -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR_ADV"
+codex exec "IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are Claude Code skill definitions meant for a different AI system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.\n\nReview the changes on this branch against the base branch. Run DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE" to see the diff. Your job is to find ways this code will fail in production. Think like an attacker and a chaos engineer. Find edge cases, race conditions, security holes, resource leaks, failure modes, and silent data corruption paths. Be adversarial. Be thorough. No compliments — just the problems. End your output with ONE line in the canonical format `Recommendation: <action> because <one-line reason naming the most exploitable finding>`. Generic reasons like 'because it's safer' do not qualify; the reason must point to a specific finding or no-fix rationale." -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR_ADV"
 ```
 
 Set the Bash tool's `timeout` parameter to `300000` (5 minutes). Do NOT use the `timeout` shell command — it doesn't exist on macOS. After the command completes, read stderr:
@@ -1584,7 +1654,7 @@ If `DIFF_TOTAL >= 200` AND Codex is available AND `OLD_CFG` is NOT `disabled`:
 TMPERR=$(mktemp /tmp/codex-review-XXXXXXXX)
 _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
 cd "$_REPO_ROOT"
-codex review "IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are Claude Code skill definitions meant for a different AI system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.\n\nReview the diff against the base branch." --base <base> -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR"
+codex review "IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are Claude Code skill definitions meant for a different AI system. They contain bash scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the repository code only.\n\nReview the changes on this branch against the base branch <base>. Run git diff origin/<base>...HEAD 2>/dev/null || git diff <base>...HEAD to see the diff and review only those changes." -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR"
 ```
 
 Set the Bash tool's `timeout` parameter to `300000` (5 minutes). Do NOT use the `timeout` shell command — it doesn't exist on macOS. Present output under `CODEX SAYS (code review):` header.

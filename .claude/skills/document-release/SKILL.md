@@ -2,12 +2,7 @@
 name: document-release
 preamble-tier: 2
 version: 1.0.0
-description: |
-  Post-ship documentation update. Reads all project docs, cross-references the
-  diff, updates README/ARCHITECTURE/CONTRIBUTING/CLAUDE.md to match what shipped,
-  polishes CHANGELOG voice, cleans up TODOS, and optionally bumps VERSION. Use when
-  asked to "update the docs", "sync documentation", or "post-ship docs".
-  Proactively suggest after a PR is merged or code is shipped. (gstack)
+description: Post-ship documentation update. (gstack)
 allowed-tools:
   - Bash
   - Read
@@ -23,6 +18,17 @@ triggers:
 ---
 <!-- AUTO-GENERATED from SKILL.md.tmpl — do not edit directly -->
 <!-- Regenerate: bun run gen:skill-docs -->
+
+
+## When to invoke this skill
+
+Reads all project docs, cross-references the
+diff, builds a Diataxis coverage map (reference/how-to/tutorial/explanation),
+updates README/ARCHITECTURE/CONTRIBUTING/CLAUDE.md to match what shipped,
+detects architecture diagram drift, polishes CHANGELOG voice with a sell-test
+rubric, cleans up TODOS, and optionally bumps VERSION. Surfaces documentation
+debt in the PR body. Use when asked to "update the docs", "sync documentation",
+or "post-ship docs". Proactively suggest after a PR is merged or code is shipped.
 
 ## Preamble (run first)
 
@@ -101,6 +107,19 @@ _CHECKPOINT_MODE=$(~/.claude/skills/bin/config get checkpoint_mode 2>/dev/null |
 _CHECKPOINT_PUSH=$(~/.claude/skills/bin/config get checkpoint_push 2>/dev/null || echo "false")
 echo "CHECKPOINT_MODE: $_CHECKPOINT_MODE"
 echo "CHECKPOINT_PUSH: $_CHECKPOINT_PUSH"
+# Plan-mode hint for skills like /spec that branch behavior on plan-mode state.
+# Claude Code exposes plan mode via system reminders; we detect best-effort
+# from CLAUDE_PLAN_FILE (set by the harness when plan mode is active) and
+# fall back to "inactive". Codex hosts and Claude execution mode both end up
+# inactive, which is the safe default (defaults to file+execute pipeline).
+if [ -n "${CLAUDE_PLAN_FILE:-}${GSTACK_PLAN_MODE_FORCE:-}" ]; then
+  export GSTACK_PLAN_MODE="active"
+elif [ "${GSTACK_PLAN_MODE:-}" = "active" ]; then
+  export GSTACK_PLAN_MODE="active"
+else
+  export GSTACK_PLAN_MODE="inactive"
+fi
+echo "GSTACK_PLAN_MODE: $GSTACK_PLAN_MODE"
 [ -n "$OPENCLAW_SESSION" ] && echo "SPAWNED_SESSION: true" || true
 ```
 
@@ -110,7 +129,7 @@ In plan mode, allowed because they inform the plan: `$B`, `$D`, `codex exec`/`co
 
 ## Skill Invocation During Plan Mode
 
-If the user invokes a skill in plan mode, the skill takes precedence over generic plan mode behavior. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; the first AskUserQuestion is the workflow entering plan mode, not a violation of it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If no variant is callable, fall back to writing the decision brief into the plan file as a `## Decisions to confirm` section + ExitPlanMode — never silently auto-decide. At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" execute. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
+If the user invokes a skill in plan mode, the skill takes precedence over generic plan mode behavior. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; the first AskUserQuestion is the workflow entering plan mode, not a violation of it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If no variant is callable, the skill is BLOCKED — stop and report `BLOCKED — AskUserQuestion unavailable` per the AskUserQuestion Format rule. At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" execute. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
 
 If `PROACTIVE` is `"false"`, do not auto-invoke or proactively suggest skills. If a skill seems useful, ask: "I think /skillname might help here — want me to run it?"
 
@@ -232,6 +251,7 @@ Key routing rules:
 - Ship/deploy/PR → invoke /ship or /land-and-deploy
 - Save progress → invoke /context-save
 - Resume context → invoke /context-restore
+- Author a backlog-ready spec/issue → invoke /spec
 ```
 
 Then commit the change: `git add CLAUDE.md && git commit -m "chore: add gstack skill routing rules to CLAUDE.md"`
@@ -281,7 +301,7 @@ AI orchestrator (e.g., OpenClaw). In spawned sessions:
 
 **Rule:** if any `mcp__*__AskUserQuestion` variant is in your tool list, prefer it. Hosts may disable native AUQ via `--disallowedTools AskUserQuestion` (Conductor does, by default) and route through their MCP variant; calling native there silently fails. Same questions/options shape; same decision-brief format applies.
 
-**Fallback when neither variant is callable:** in plan mode, write the decision brief into the plan file as a `## Decisions to confirm` section + ExitPlanMode (the native "Ready to execute?" surfaces it). Outside plan mode, output the brief as prose and stop. **Never silently auto-decide** — only `/plan-tune` AUTO_DECIDE opt-ins authorize auto-picking.
+**If no AskUserQuestion variant appears in your tool list, this skill is BLOCKED.** Stop, report `BLOCKED — AskUserQuestion unavailable`, and wait for the user. Do not write decisions to the plan file as a substitute, do not emit them as prose and stop, and do not silently auto-decide (only `/plan-tune` AUTO_DECIDE opt-ins authorize auto-picking).
 
 ### Format
 
@@ -318,6 +338,55 @@ Effort both-scales: when an option involves effort, label both human-team and CC
 
 Net line closes the tradeoff. Per-skill instructions may add stricter rules.
 
+### Handling 5+ options — split, never drop
+
+AskUserQuestion caps every call at **4 options**. With 5+ real options, NEVER
+drop, merge, or silently defer one to fit. Pick a compliant shape:
+
+- **Batch into ≤4-groups** — for coherent alternatives (e.g. version bumps,
+  layout variants). One call, 5th surfaced only if first 4 don't fit.
+- **Split per-option** — for independent scope items (e.g. "ship E1..E6?").
+  Fire N sequential calls, one per option. Default to this when unsure.
+
+Per-option call shape: `D<N>.k` header (e.g. D3.1..D3.5), ELI10 per option,
+Recommendation, kind-note (no completeness score — Include/Defer/Cut/Hold are
+decision actions), and 4 buckets:
+**A) Include**, **B) Defer**, **C) Cut**, **D) Hold** (stop chain, discuss).
+
+After the chain, fire `D<N>.final` to validate the assembled set (reprompt
+dependency conflicts) and confirm shipping it. Use `D<N>.revise-<k>` to
+revise one option without re-running the chain.
+
+For N>6, fire a `D<N>.0` meta-AskUserQuestion first (proceed / narrow / batch).
+
+question_ids for split chains: `<skill>-split-<option-slug>` (kebab-case ASCII,
+≤64 chars, `-2`/`-3` suffix on collision). The runtime checker
+(`bin/gstack-question-preference`) refuses `never-ask` on any `*-split-*` id,
+so split chains are never AUTO_DECIDE-eligible — the user's option set is sacred.
+
+**Full rule + worked examples + Hold/dependency semantics:** see
+`docs/askuserquestion-split.md` in the gstack repo. Read on demand when N>4.
+
+**Non-ASCII characters — write directly, never \u-escape.** When any
+    string field (question, option label, option description) contains
+    Chinese (繁體/簡體), Japanese, Korean, or other non-ASCII text, emit
+    the literal UTF-8 characters in the JSON string. **Never escape them
+    as `\uXXXX`.** Claude Code's tool parameter pipe is UTF-8 native
+    and passes characters through unchanged. Manually escaping requires
+    recalling each codepoint from training, which is unreliable for long
+    CJK strings — the model regularly emits the wrong codepoint (e.g.
+    writes `\u3103` thinking it is 管 U+7BA1, but `\u3103` is
+    actually ㄃, so the user sees `管理工具` rendered as `㄃3用箱`).
+    The trigger is long, multi-line questions with hundreds of CJK
+    characters: that is exactly when reflexive escaping kicks in and
+    exactly when miscoding is most damaging. Long ≠ escape. Keep
+    characters literal.
+
+    Wrong: `"question": "請選擇\uXXXX\uXXXX\uXXXX\uXXXX"`
+    Right: `"question": "請選擇管理工具"`
+
+    Only JSON-mandatory escapes remain allowed: `\n`, `\t`, `\"`, `\\`.
+
 ### Self-check before emitting
 
 Before calling AskUserQuestion, verify:
@@ -330,6 +399,10 @@ Before calling AskUserQuestion, verify:
 - [ ] Dual-scale effort labels on effort-bearing options (human / CC)
 - [ ] Net line closes the decision
 - [ ] You are calling the tool, not writing prose
+- [ ] Non-ASCII characters (CJK / accents) written directly, NOT \u-escaped
+- [ ] If you had 5+ options, you split (or batched into ≤4-groups) — did NOT drop any
+- [ ] If you split, you checked dependencies between options before firing the chain
+- [ ] If a per-option Hold fires, you stopped the chain immediately (didn't queue)
 
 
 ## Artifacts Sync (skill start)
@@ -347,30 +420,29 @@ _BRAIN_SYNC_BIN="~/.claude/skills/bin/brain-sync"
 _BRAIN_CONFIG_BIN="~/.claude/skills/bin/config"
 
 # /sync-gbrain context-load: teach the agent to use gbrain when it's available.
-# Mutually exclusive variants per /plan-eng-review §4. Empty string when gbrain
-# is not configured (zero context cost for non-gbrain users).
+# Per-worktree pin: post-spike redesign uses kubectl-style `.gbrain-source` in the
+# git toplevel to scope queries. Look for the pin in the worktree (not a global
+# state file) so that opening worktree B without a pin doesn't claim "indexed"
+# just because worktree A was synced. Empty string when gbrain is not
+# configured (zero context cost for non-gbrain users).
 _GBRAIN_CONFIG="$HOME/.gbrain/config.json"
 if [ -f "$_GBRAIN_CONFIG" ] && command -v gbrain >/dev/null 2>&1; then
   _GBRAIN_VERSION_OK=$(gbrain --version 2>/dev/null | grep -c '^gbrain ' || echo 0)
   if [ "$_GBRAIN_VERSION_OK" -gt 0 ] 2>/dev/null; then
-    _SYNC_STATE="$_GSTACK_HOME/.gbrain-sync-state.json"
-    _CWD_PAGES=0
-    if [ -f "$_SYNC_STATE" ]; then
-      # Flatten newlines so the regex works against pretty-printed JSON too.
-      _CWD_PAGES=$(tr -d '\n' < "$_SYNC_STATE" 2>/dev/null \
-        | grep -o '"name": *"code"[^}]*"detail": *{[^}]*"page_count": *[0-9]*' \
-        | grep -o '"page_count": *[0-9]*' | grep -o '[0-9]\+' | head -1)
-      _CWD_PAGES=${_CWD_PAGES:-0}
+    _GBRAIN_PIN_PATH=""
+    _REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+    if [ -n "$_REPO_TOP" ] && [ -f "$_REPO_TOP/.gbrain-source" ]; then
+      _GBRAIN_PIN_PATH="$_REPO_TOP/.gbrain-source"
     fi
-    if [ "$_CWD_PAGES" -gt 0 ] 2>/dev/null; then
+    if [ -n "$_GBRAIN_PIN_PATH" ]; then
       echo "GBrain configured. Prefer \`gbrain search\`/\`gbrain query\` over Grep for"
       echo "semantic questions; use \`gbrain code-def\`/\`code-refs\`/\`code-callers\` for"
       echo "symbol-aware code lookup. See \"## GBrain Search Guidance\" in CLAUDE.md."
       echo "Run /sync-gbrain to refresh."
     else
-      echo "GBrain configured but this repo isn't indexed yet. Run \`/sync-gbrain --full\`"
-      echo "before relying on \`gbrain search\` for code questions in this repo."
-      echo "Falls back to Grep until indexed."
+      echo "GBrain configured but this worktree isn't pinned yet. Run \`/sync-gbrain --full\`"
+      echo "before relying on \`gbrain search\` for code questions in this worktree."
+      echo "Falls back to Grep until pinned."
     fi
   fi
 fi
@@ -530,84 +602,7 @@ Applies to AskUserQuestion, user replies, and findings. AskUserQuestion Format i
 - User-turn override wins: if the current message asks for terse / no explanations / just the answer, skip this section.
 - Terse mode (EXPLAIN_LEVEL: terse): no glosses, no outcome-framing layer, shorter responses.
 
-Jargon list, gloss on first use if the term appears:
-- idempotent
-- idempotency
-- race condition
-- deadlock
-- cyclomatic complexity
-- N+1
-- N+1 query
-- backpressure
-- memoization
-- eventual consistency
-- CAP theorem
-- CORS
-- CSRF
-- XSS
-- SQL injection
-- prompt injection
-- DDoS
-- rate limit
-- throttle
-- circuit breaker
-- load balancer
-- reverse proxy
-- SSR
-- CSR
-- hydration
-- tree-shaking
-- bundle splitting
-- code splitting
-- hot reload
-- tombstone
-- soft delete
-- cascade delete
-- foreign key
-- composite index
-- covering index
-- OLTP
-- OLAP
-- sharding
-- replication lag
-- quorum
-- two-phase commit
-- saga
-- outbox pattern
-- inbox pattern
-- optimistic locking
-- pessimistic locking
-- thundering herd
-- cache stampede
-- bloom filter
-- consistent hashing
-- virtual DOM
-- reconciliation
-- closure
-- hoisting
-- tail call
-- GIL
-- zero-copy
-- mmap
-- cold start
-- warm start
-- green-blue deploy
-- canary deploy
-- feature flag
-- kill switch
-- dead letter queue
-- fan-out
-- fan-in
-- debounce
-- throttle (UI)
-- hydration mismatch
-- memory leak
-- GC pause
-- heap fragmentation
-- stack overflow
-- null pointer
-- dangling pointer
-- buffer overflow
+Curated jargon list lives at `~/.claude/skills/scripts/jargon-list.json` (80+ terms). On the first jargon term you encounter this session, Read that file once; treat the `terms` array as the canonical list. The list is repo-owned and may grow between releases.
 
 
 ## Completeness Principle — Boil the Lake
@@ -655,7 +650,11 @@ If you are looping on the same diagnostic, same file, or failed fix variants, ST
 
 Before each AskUserQuestion, choose `question_id` from `scripts/question-registry.ts` or `{skill}-{slug}`, then run `~/.claude/skills/bin/question-preference --check "<id>"`. `AUTO_DECIDE` means choose the recommended option and say "Auto-decided [summary] → [option] (your preference). Change with /plan-tune." `ASK_NORMALLY` means ask.
 
-After answer, log best-effort:
+**Embed the question_id as a marker in the question text** so hooks can identify it deterministically (plan-tune cathedral T14 / D18 progressive markers). Append `<gstack-qid:{question_id}>` somewhere in the rendered question (the leading line or trailing line is fine; the marker doesn't render visibly to the user when wrapped in HTML-style angle brackets, but the hook strips it). Without the marker the PreToolUse enforcement hook treats the AUQ as observed-only and never auto-decides — so always include it when the question matches a registered `question_id`.
+
+**Embed the option recommendation via the `(recommended)` label suffix** on exactly one option per AUQ. The PreToolUse hook parses `(recommended)` first, falls back to "Recommendation: X" prose, and refuses to auto-decide if ambiguous. Two `(recommended)` labels = refuse.
+
+After answer, log best-effort (PostToolUse hook also captures deterministically when installed; dedup on (source, tool_use_id) handles double-writes):
 ```bash
 ~/.claude/skills/bin/question-log '{"skill":"document-release","question_id":"<id>","question_summary":"<short>","category":"<approval|clarification|routing|cherry-pick|feedback-loop>","door_type":"<one-way|two-way>","options_count":N,"user_choice":"<key>","recommended":"<key>","session_id":"'"$_SESSION_ID"'"}' 2>/dev/null || true
 ```
@@ -722,9 +721,7 @@ Replace `SKILL_NAME`, `OUTCOME`, and `USED_BROWSE` before running.
 
 ## Plan Status Footer
 
-In plan mode before ExitPlanMode: if the plan file lacks `## GSTACK REVIEW REPORT`, run `~/.claude/skills/bin/review-read` and append the standard runs/status/findings table. With `NO_REVIEWS` or empty, append a 5-row placeholder with verdict "NO REVIEWS YET — run `/autoplan`". If a richer report exists, skip.
-
-PLAN MODE EXCEPTION — always allowed (it's the plan file).
+Skills that run plan reviews (`/plan-*-review`, `/codex review`) include the EXIT PLAN MODE GATE blocking checklist at the end of the skill, which verifies the plan file ends with `## GSTACK REVIEW REPORT` before ExitPlanMode is called. Skills that don't run plan reviews (operational skills like `/ship`, `/qa`, `/review`) typically don't operate in plan mode and have no review report to verify; this footer is a no-op for them. Writing the plan file is the one edit allowed in plan mode.
 
 ## Step 0: Detect platform and base branch
 
@@ -830,6 +827,48 @@ find . -maxdepth 2 -name "*.md" -not -path "./.git/*" -not -path "./node_modules
 
 ---
 
+## Step 1.5: Coverage Map (Blast-Radius Analysis)
+
+Before touching any documentation file, build a **coverage map** of what shipped vs what's
+documented. This is inspired by the Diataxis framework (tutorial / how-to / reference / explanation)
+— but applied as an audit lens, not a generation tool.
+
+1. **Extract public surface changes from the diff.** Scan `git diff <base>...HEAD` for:
+   - New exported functions, classes, commands, CLI flags, config options, API endpoints
+   - New skills, workflows, or user-facing capabilities
+   - Renamed or removed public surface (modules, commands, features)
+   - New environment variables, feature flags, or configuration knobs
+
+2. **For each new/changed public surface item, assess documentation coverage:**
+
+```
+Coverage map:
+  [entity]         [reference?] [how-to?] [tutorial?] [explanation?]
+  /new-skill       ✅ AGENTS.md  ❌        ❌          ❌
+  --new-flag       ✅ README     ✅ README  ❌          ❌
+  FooProcessor     ❌            ❌        ❌          ❌
+```
+
+Use these definitions:
+- **Reference** — factual description of what it is, its API, its options (README tables, AGENTS.md skill lists, API docs)
+- **How-to** — task-oriented: "how to do X with this" (README examples, CONTRIBUTING workflows)
+- **Tutorial** — learning-oriented: step-by-step walkthrough for newcomers (getting started guides)
+- **Explanation** — understanding-oriented: "why this works this way" (ARCHITECTURE decisions, design rationale)
+
+3. **Output the coverage map.** Items with zero coverage are **critical gaps** — flag them for
+   Step 3. Items with reference-only coverage are **common gaps** — note them for the PR body.
+
+4. **Architecture diagram drift detection.** If ARCHITECTURE.md (or any doc) contains ASCII
+   diagrams or Mermaid blocks, extract entity names (modules, services, data flows) from the
+   diagrams. Cross-reference against the diff. Flag any diagram entities that were renamed,
+   split, removed, or moved in the code.
+
+The coverage map feeds into Steps 2-3 (what to audit and fix) and Step 9 (documentation debt
+summary in the PR body). Do NOT auto-generate missing documentation pages — flag gaps only.
+When significant gaps are found, suggest running `/document-generate` to fill them.
+
+---
+
 ## Step 2: Per-File Documentation Audit
 
 Read each documentation file and cross-reference it against the diff. Use these generic heuristics
@@ -922,8 +961,11 @@ preserved them. This skill must NEVER do that.
 
 **If CHANGELOG was modified in this branch**, review the entry for voice:
 
-- **Sell test:** Would a user reading each bullet think "oh nice, I want to try that"? If not,
-  rewrite the wording (not the content).
+- **Sell test (Diataxis rubric):** Score each CHANGELOG entry 0-3:
+  - **1 point** — answers "What changed?" (reference: names the feature/fix)
+  - **1 point** — answers "Why should I care?" (explanation: user impact, pain removed)
+  - **1 point** — answers "How do I use it?" (how-to: command, flag, or link to docs)
+  - Entries scoring <2 need a rewrite. Entries scoring 3 are gold.
 - Lead with what the user can now **do** — not implementation details.
 - "You can now..." not "Refactored the..."
 - Flag and rewrite any entry that reads like a commit message.
@@ -1051,11 +1093,32 @@ glab mr view -F json 2>/dev/null | python3 -c "import sys,json; print(json.load(
 2. If the tempfile already contains a `## Documentation` section, replace that section with the
    updated content. If it does not contain one, append a `## Documentation` section at the end.
 
-3. The Documentation section should include a **doc diff preview** — for each file modified,
-   describe what specifically changed (e.g., "README.md: added /document-release to skills
-   table, updated skill count from 9 to 10").
+3. The Documentation section should include:
 
-4. Write the updated body back:
+   a. **Doc diff preview** — for each file modified, describe what specifically changed (e.g.,
+      "README.md: added /document-release to skills table, updated skill count from 9 to 10").
+
+   b. **Documentation debt** — if the coverage map from Step 1.5 found gaps, append a
+      `### Documentation Debt` subsection listing:
+      - Critical gaps: new public surface with zero documentation coverage
+      - Common gaps: features with reference-only coverage (no how-to or tutorial)
+      - Stale diagrams: architecture diagrams with entity names that drifted from the code
+      - Each item should include a one-line description of what's missing and which Diataxis
+        quadrant would fill it (e.g., "⚠️ `/new-skill` — has reference in AGENTS.md but no
+        how-to example in README")
+
+   If there are any documentation debt items, suggest adding a `docs-debt` label to the PR.
+
+4. Redaction scan-at-sink, then write the updated body back. The body is already
+   in a temp file (`/tmp/gstack-pr-body-$$.md`); scan THAT file before editing so
+   the bytes scanned are the bytes sent:
+
+```bash
+REDACT_VIS=$(~/.claude/skills/bin/config get redact_repo_visibility 2>/dev/null)
+[ -z "$REDACT_VIS" ] && REDACT_VIS=$(gh repo view --json visibility -q .visibility 2>/dev/null | tr 'A-Z' 'a-z')
+~/.claude/skills/bin/redact --from-file /tmp/gstack-pr-body-$$.md --repo-visibility "${REDACT_VIS:-unknown}" --json
+# exit 3 (HIGH) → do NOT edit, rotate+redact; exit 2 (MEDIUM) → confirm per finding.
+```
 
 **If GitHub:**
 ```bash
@@ -1151,6 +1214,20 @@ Where status is one of:
 - Already bumped — version was set by /ship
 - Skipped — file does not exist
 
+If the coverage map from Step 1.5 identified any gaps, append:
+
+```
+Documentation coverage:
+  [entity]         [reference] [how-to] [tutorial] [explanation]
+  /new-skill       ✅          ❌       ❌         ❌
+  --new-flag       ✅          ✅       ❌         ❌
+
+Diagram drift:
+  ARCHITECTURE.md: "FooProcessor" renamed to "BarProcessor" in code — diagram may be stale
+```
+
+If all coverage is complete and no diagrams drifted, output: "Coverage: all shipped features have adequate documentation."
+
 ---
 
 ## Important Rules
@@ -1161,5 +1238,10 @@ Where status is one of:
 - **Be explicit about what changed.** Every edit gets a one-line summary.
 - **Generic heuristics, not project-specific.** The audit checks work on any repo.
 - **Discoverability matters.** Every doc file should be reachable from README or CLAUDE.md.
+- **Coverage map informs, never generates.** The Diataxis coverage map flags gaps for the PR body
+  and future work. It does NOT auto-generate missing documentation pages or sections. When gaps
+  are found, suggest `/document-generate` as the follow-up skill.
+- **Diagram drift is advisory.** Flag stale architecture diagrams in the PR body but do not
+  auto-edit ASCII art or Mermaid blocks — they require human judgment to update correctly.
 - **Voice: friendly, user-forward, not obscure.** Write like you're explaining to a smart person
   who hasn't seen the code.

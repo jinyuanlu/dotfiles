@@ -2,13 +2,7 @@
 name: browse
 preamble-tier: 1
 version: 1.1.0
-description: |
-  Fast headless browser for QA testing and site dogfooding. Navigate any URL, interact with
-  elements, verify page state, diff before/after actions, take annotated screenshots, check
-  responsive layouts, test forms and uploads, handle dialogs, and assert element states.
-  ~100ms per command. Use when you need to test a feature, verify a deployment, dogfood a
-  user flow, or file a bug with evidence. Use when asked to "open in browser", "test the
-  site", "take a screenshot", or "dogfood this". (gstack)
+description: Fast headless browser for QA testing and site dogfooding. (gstack)
 triggers:
   - browse a page
   - headless browser
@@ -21,6 +15,16 @@ allowed-tools:
 ---
 <!-- AUTO-GENERATED from SKILL.md.tmpl — do not edit directly -->
 <!-- Regenerate: bun run gen:skill-docs -->
+
+
+## When to invoke this skill
+
+Navigate any URL, interact with
+elements, verify page state, diff before/after actions, take annotated screenshots, check
+responsive layouts, test forms and uploads, handle dialogs, and assert element states.
+~100ms per command. Use when you need to test a feature, verify a deployment, dogfood a
+user flow, or file a bug with evidence. Use when asked to "open in browser", "test the
+site", "take a screenshot", or "dogfood this".
 
 ## Preamble (run first)
 
@@ -99,6 +103,19 @@ _CHECKPOINT_MODE=$(~/.claude/skills/bin/config get checkpoint_mode 2>/dev/null |
 _CHECKPOINT_PUSH=$(~/.claude/skills/bin/config get checkpoint_push 2>/dev/null || echo "false")
 echo "CHECKPOINT_MODE: $_CHECKPOINT_MODE"
 echo "CHECKPOINT_PUSH: $_CHECKPOINT_PUSH"
+# Plan-mode hint for skills like /spec that branch behavior on plan-mode state.
+# Claude Code exposes plan mode via system reminders; we detect best-effort
+# from CLAUDE_PLAN_FILE (set by the harness when plan mode is active) and
+# fall back to "inactive". Codex hosts and Claude execution mode both end up
+# inactive, which is the safe default (defaults to file+execute pipeline).
+if [ -n "${CLAUDE_PLAN_FILE:-}${GSTACK_PLAN_MODE_FORCE:-}" ]; then
+  export GSTACK_PLAN_MODE="active"
+elif [ "${GSTACK_PLAN_MODE:-}" = "active" ]; then
+  export GSTACK_PLAN_MODE="active"
+else
+  export GSTACK_PLAN_MODE="inactive"
+fi
+echo "GSTACK_PLAN_MODE: $GSTACK_PLAN_MODE"
 [ -n "$OPENCLAW_SESSION" ] && echo "SPAWNED_SESSION: true" || true
 ```
 
@@ -108,7 +125,7 @@ In plan mode, allowed because they inform the plan: `$B`, `$D`, `codex exec`/`co
 
 ## Skill Invocation During Plan Mode
 
-If the user invokes a skill in plan mode, the skill takes precedence over generic plan mode behavior. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; the first AskUserQuestion is the workflow entering plan mode, not a violation of it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If no variant is callable, fall back to writing the decision brief into the plan file as a `## Decisions to confirm` section + ExitPlanMode — never silently auto-decide. At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" execute. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
+If the user invokes a skill in plan mode, the skill takes precedence over generic plan mode behavior. **Treat the skill file as executable instructions, not reference.** Follow it step by step starting from Step 0; the first AskUserQuestion is the workflow entering plan mode, not a violation of it. AskUserQuestion (any variant — `mcp__*__AskUserQuestion` or native; see "AskUserQuestion Format → Tool resolution") satisfies plan mode's end-of-turn requirement. If no variant is callable, the skill is BLOCKED — stop and report `BLOCKED — AskUserQuestion unavailable` per the AskUserQuestion Format rule. At a STOP point, stop immediately. Do not continue the workflow or call ExitPlanMode there. Commands marked "PLAN MODE EXCEPTION — ALWAYS RUN" execute. Call ExitPlanMode only after the skill workflow completes, or if the user tells you to cancel the skill or leave plan mode.
 
 If `PROACTIVE` is `"false"`, do not auto-invoke or proactively suggest skills. If a skill seems useful, ask: "I think /skillname might help here — want me to run it?"
 
@@ -230,6 +247,7 @@ Key routing rules:
 - Ship/deploy/PR → invoke /ship or /land-and-deploy
 - Save progress → invoke /context-save
 - Resume context → invoke /context-restore
+- Author a backlog-ready spec/issue → invoke /spec
 ```
 
 Then commit the change: `git add CLAUDE.md && git commit -m "chore: add gstack skill routing rules to CLAUDE.md"`
@@ -286,30 +304,29 @@ _BRAIN_SYNC_BIN="~/.claude/skills/bin/brain-sync"
 _BRAIN_CONFIG_BIN="~/.claude/skills/bin/config"
 
 # /sync-gbrain context-load: teach the agent to use gbrain when it's available.
-# Mutually exclusive variants per /plan-eng-review §4. Empty string when gbrain
-# is not configured (zero context cost for non-gbrain users).
+# Per-worktree pin: post-spike redesign uses kubectl-style `.gbrain-source` in the
+# git toplevel to scope queries. Look for the pin in the worktree (not a global
+# state file) so that opening worktree B without a pin doesn't claim "indexed"
+# just because worktree A was synced. Empty string when gbrain is not
+# configured (zero context cost for non-gbrain users).
 _GBRAIN_CONFIG="$HOME/.gbrain/config.json"
 if [ -f "$_GBRAIN_CONFIG" ] && command -v gbrain >/dev/null 2>&1; then
   _GBRAIN_VERSION_OK=$(gbrain --version 2>/dev/null | grep -c '^gbrain ' || echo 0)
   if [ "$_GBRAIN_VERSION_OK" -gt 0 ] 2>/dev/null; then
-    _SYNC_STATE="$_GSTACK_HOME/.gbrain-sync-state.json"
-    _CWD_PAGES=0
-    if [ -f "$_SYNC_STATE" ]; then
-      # Flatten newlines so the regex works against pretty-printed JSON too.
-      _CWD_PAGES=$(tr -d '\n' < "$_SYNC_STATE" 2>/dev/null \
-        | grep -o '"name": *"code"[^}]*"detail": *{[^}]*"page_count": *[0-9]*' \
-        | grep -o '"page_count": *[0-9]*' | grep -o '[0-9]\+' | head -1)
-      _CWD_PAGES=${_CWD_PAGES:-0}
+    _GBRAIN_PIN_PATH=""
+    _REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+    if [ -n "$_REPO_TOP" ] && [ -f "$_REPO_TOP/.gbrain-source" ]; then
+      _GBRAIN_PIN_PATH="$_REPO_TOP/.gbrain-source"
     fi
-    if [ "$_CWD_PAGES" -gt 0 ] 2>/dev/null; then
+    if [ -n "$_GBRAIN_PIN_PATH" ]; then
       echo "GBrain configured. Prefer \`gbrain search\`/\`gbrain query\` over Grep for"
       echo "semantic questions; use \`gbrain code-def\`/\`code-refs\`/\`code-callers\` for"
       echo "symbol-aware code lookup. See \"## GBrain Search Guidance\" in CLAUDE.md."
       echo "Run /sync-gbrain to refresh."
     else
-      echo "GBrain configured but this repo isn't indexed yet. Run \`/sync-gbrain --full\`"
-      echo "before relying on \`gbrain search\` for code questions in this repo."
-      echo "Falls back to Grep until indexed."
+      echo "GBrain configured but this worktree isn't pinned yet. Run \`/sync-gbrain --full\`"
+      echo "before relying on \`gbrain search\` for code questions in this worktree."
+      echo "Falls back to Grep until pinned."
     fi
   fi
 fi
@@ -475,9 +492,7 @@ Replace `SKILL_NAME`, `OUTCOME`, and `USED_BROWSE` before running.
 
 ## Plan Status Footer
 
-In plan mode before ExitPlanMode: if the plan file lacks `## GSTACK REVIEW REPORT`, run `~/.claude/skills/bin/review-read` and append the standard runs/status/findings table. With `NO_REVIEWS` or empty, append a 5-row placeholder with verdict "NO REVIEWS YET — run `/autoplan`". If a richer report exists, skip.
-
-PLAN MODE EXCEPTION — always allowed (it's the plan file).
+Skills that run plan reviews (`/plan-*-review`, `/codex review`) include the EXIT PLAN MODE GATE blocking checklist at the end of the skill, which verifies the plan file ends with `## GSTACK REVIEW REPORT` before ExitPlanMode is called. Skills that don't run plan reviews (operational skills like `/ship`, `/qa`, `/review`) typically don't operate in plan mode and have no review report to verify; this footer is a no-op for them. Writing the plan file is the one edit allowed in plan mode.
 
 # browse: QA Testing & Dogfooding
 
@@ -679,6 +694,42 @@ $B resume
 The browser preserves all state (cookies, localStorage, tabs) across the handoff.
 After `resume`, you get a fresh snapshot of wherever the user left off.
 
+## Headed Mode + Proxy + Anti-Bot Sites
+
+For sites that block headless browsers, fingerprint Playwright defaults, or require routing through an authenticated SOCKS5 proxy (residential VPN, etc.), browse exposes three coordinated flags:
+
+```bash
+# Headed mode — visible Chromium window. Auto-spawns Xvfb on Linux
+# containers without DISPLAY (no extra setup needed on Debian/Ubuntu).
+browse --headed goto https://example.com
+
+# SOCKS5 with auth (Chromium can't prompt for SOCKS5 creds itself —
+# browse runs a local 127.0.0.1 bridge that handles the auth handshake).
+browse --proxy socks5://user:pass@residential.proxy.host:1080 goto https://example.com
+
+# HTTP/HTTPS proxy (passes through to Chromium directly):
+browse --proxy http://corp-proxy:3128 goto https://example.com
+
+# Browser-triggered file download (Content-Disposition, redirect chain,
+# anti-bot CDN — falls back from page.request.fetch() to browser native
+# download handler):
+browse download "https://protected.example.com/file" /tmp/file.bin --navigate
+
+# Combined: headed + proxy + navigate-download
+browse --headed --proxy socks5://user:pass@host:1080 \
+  download "https://protected.example.com/file" /tmp/file.bin --navigate
+```
+
+**Credential policy.** Pass creds via either the URL (`socks5://user:pass@host`) OR the env vars `BROWSE_PROXY_USER` and `BROWSE_PROXY_PASS` — never both. Browse refuses with a clear hint when both are set, because silent override creates "works on my machine" debugging traps.
+
+**Daemon discipline.** Browse runs as a long-lived daemon. `--proxy` and `--headed` change daemon-startup config, so they only apply on a fresh daemon. If a daemon is already running with different config, browse refuses and tells you to `browse disconnect` first. No silent restart that would drop tab state, cookies, or logged-in sessions.
+
+**Stealth.** When `--headed` or `--proxy` are set, browse masks `navigator.webdriver` (the obvious automation tell) via Chromium's `--disable-blink-features=AutomationControlled` plus a small init script. We do NOT fake `navigator.plugins`, `navigator.languages`, or `window.chrome` — modern fingerprinters check those for consistency, and synthesizing fixed values can flag MORE bot-like, not less.
+
+**Container support.** `--headed` on Linux without `DISPLAY` automatically picks a free X display (`:99`, `:100`, ...) and spawns Xvfb. Cleanup on `browse disconnect` validates the recorded PID's `/proc/<pid>/cmdline` matches `Xvfb` AND start-time matches before sending any signal — no PID-reuse footguns. Standard Debian/Ubuntu containers work out of the box; minimal images (alpine, distroless) may also need fonts/dbus/gtk libs for headed Chromium to render.
+
+**Failure modes.** SOCKS5 upstream rejected or unreachable → fail-fast at startup with a redacted error after 3 retries (5s budget). Mid-stream upstream drop → browse kills the affected client connection only; no transport retries (which could corrupt browser traffic). Mismatched daemon config → exit 1 with a `browse disconnect` hint.
+
 ## Snapshot Flags
 
 The snapshot is your primary tool for understanding and interacting with pages.
@@ -786,7 +837,7 @@ $B prettyscreenshot --cleanup --scroll-to ".pricing" --width 1440 ~/Desktop/hero
 | Command | Description |
 |---------|-------------|
 | `archive [path]` | Save complete page as MHTML via CDP |
-| `download <url|@ref> [path] [--base64]` | Download URL or media element to disk using browser cookies |
+| `download <url|@ref> [path] [--base64] [--navigate]` | Download URL or media element to disk using browser cookies. Use --navigate for URLs that trigger browser downloads (CDN redirects, Content-Disposition, anti-bot protected sites) |
 | `scrape <images|videos|media> [--selector sel] [--dir path] [--limit N]` | Bulk download all media from page. Writes manifest.json |
 
 ### Interaction
@@ -870,6 +921,7 @@ $B prettyscreenshot --cleanup --scroll-to ".pricing" --width 1440 ~/Desktop/hero
 | `disconnect` | Disconnect headed browser, return to headless mode |
 | `focus [@ref]` | Bring headed browser window to foreground (macOS) |
 | `handoff [message]` | Open visible Chrome at current page for user takeover |
+| `memory [--json]` | Snapshot Bun heap + per-tab JS heap + Chromium process tree + bounded buffer sizes. JSON output with --json. |
 | `restart` | Restart server |
 | `resume` | Re-snapshot after user takeover, return control to AI |
 | `state save|load <name>` | Save/load browser state (cookies + URLs) |
