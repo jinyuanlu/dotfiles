@@ -11,6 +11,7 @@ brew "lua"
 brew "uv"
 cask "tla+-toolbox"
 cask "alloy"
+cask "cmux" # Ghostty-based terminal for AI coding agents
 
 # utils
 brew 'fd'
