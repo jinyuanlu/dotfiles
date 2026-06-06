@@ -2,3 +2,4 @@
 .envrc filter=git-crypt diff=git-crypt
 .zsh_secrets.sh filter=git-crypt diff=git-crypt
 .claude/skills/trading-trigger/*.md filter=git-crypt diff=git-crypt
+.claude/personas/*.md filter=git-crypt diff=git-crypt
