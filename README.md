@@ -20,6 +20,26 @@ bin/setup-git-hooks        # sets core.hooksPath = .githooks
 
 This installs a `post-checkout` hook that auto-links the git-crypt key into new worktrees, so `git worktree add` yields a clean, decrypted tree with no manual symlinking. (git-crypt 0.8.0 only finds its key in the common git-dir, not in worktree git-dirs.)
 
+### cmux (custom binary starter)
+
+cmux exec's the agent binary directly, so the `claude` alias in `.aliases.sh` never fires and MCP servers go missing. Point cmux at the wrapper instead:
+
+```
+Settings > Automation > Claude Code > Claude Binary Path
+  -> ~/.claude/bin/claude-cmux
+```
+
+Equivalent via env: `export CMUX_CUSTOM_CLAUDE_PATH="$HOME/.claude/bin/claude-cmux"`.
+
+`.claude/bin/claude-cmux` re-applies `--dangerously-skip-permissions --mcp-config ~/.claude/mcp.json` (matching the alias) and `exec`s the real binary. It walks `$PATH` by hand to skip cmux's own per-surface shim (`/tmp/cmux-cli-shims/…`) — a plain lookup finds the shim and loops. If `mcp.json` is still git-crypt locked it warns and starts without MCP rather than dying on a parse error.
+
+| Env var | Effect |
+|---|---|
+| `CLAUDE_REAL_BIN` | Skip `$PATH` discovery, use this binary |
+| `CLAUDE_MCP_CONFIG` | Use a different MCP config than `~/.claude/mcp.json` |
+
+Subcommands (`claude mcp`, `claude update`, …) pass through unmodified — a global flag placed before a subcommand swallows it.
+
 ### How it works
 
 ```
