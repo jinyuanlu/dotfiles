@@ -26,10 +26,12 @@ cmux exec's the agent binary directly, so the `claude` alias in `.aliases.sh` ne
 
 ```
 Settings > Automation > Claude Code > Claude Binary Path
-  -> ~/.claude/bin/claude-cmux
+  -> /Users/<you>/.claude/bin/claude-cmux
 ```
 
-Equivalent via env: `export CMUX_CUSTOM_CLAUDE_PATH="$HOME/.claude/bin/claude-cmux"`.
+**Must be absolute — `~` does not work.** cmux stores the field verbatim and checks it with `[[ -f "$custom" && -x "$custom" ]]`, which performs no tilde expansion. A `~/...` value fails that test, and cmux falls back to `$PATH` silently: the session starts, just without any of the flags. This setting lives in `~/Library/Preferences/com.cmuxterm.app.plist`, which is not tracked here, so set it per machine.
+
+Equivalent via env: `export CMUX_CUSTOM_CLAUDE_PATH="$HOME/.claude/bin/claude-cmux"` (the shell expands `$HOME` here, so this form is fine).
 
 `.claude/bin/claude-cmux` re-applies `--dangerously-skip-permissions --mcp-config ~/.claude/mcp.json` (matching the alias) and `exec`s the real binary. It walks `$PATH` by hand to skip cmux's own per-surface shim (`/tmp/cmux-cli-shims/…`) — a plain lookup finds the shim and loops. If `mcp.json` is still git-crypt locked it warns and starts without MCP rather than dying on a parse error.
 

@@ -3,8 +3,11 @@
 # claude-cmux — target for cmux's "Claude Binary Path".
 #
 #   cmux Settings > Automation > Claude Code > Claude Binary Path
-#     -> ~/.claude/bin/claude-cmux
-#   (or export CMUX_CUSTOM_CLAUDE_PATH=~/.claude/bin/claude-cmux)
+#     -> /Users/<you>/.claude/bin/claude-cmux
+#
+# The path must be ABSOLUTE. cmux stores the field verbatim and tests it with
+# [[ -f "$custom" ]], which does not expand `~`; a tilde path fails the test and
+# cmux falls back to $PATH silently, so none of this runs.
 #
 # Why this exists: cmux exec's the agent binary directly, so the interactive
 # `claude` alias in ~/.aliases.sh never applies. This re-applies the same flags

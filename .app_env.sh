@@ -22,3 +22,14 @@ export GBRAIN_DISABLE_DIRECT_POOL=1
 # Gateway back to paper (4002).
 export IB_PORT=4001
 export INVESTMENTOS_ALLOW_LIVE=1
+
+# cmux: route `claude` through our wrapper so sessions get the same flags the
+# alias adds. cmux's shell integration runs `builtin unalias claude` and
+# replaces it with a function into cmux-claude-wrapper, so the alias in
+# .aliases.sh is deleted in every cmux surface.
+#
+# Set here rather than in Settings > Automation > Claude Binary Path: cmux
+# stores that field verbatim and tests it with [[ -f "$custom" ]], which never
+# expands `~`, so a tilde path silently falls back to PATH. $HOME expands here,
+# and this version-controlled form works on every machine.
+export CMUX_CUSTOM_CLAUDE_PATH="$HOME/.claude/bin/claude-cmux"
