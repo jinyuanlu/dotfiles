@@ -22,25 +22,37 @@ This installs a `post-checkout` hook that auto-links the git-crypt key into new 
 
 ### cmux (custom binary starter)
 
-cmux exec's the agent binary directly, so the `claude` alias in `.aliases.sh` never fires and MCP servers go missing. Point cmux at the wrapper instead:
+The `claude` alias in `.aliases.sh` does not survive in cmux. cmux's shell integration runs `builtin unalias claude` and replaces it with a function routing into `cmux-claude-wrapper`, so every surface starts without `--dangerously-skip-permissions` or `--mcp-config` and no MCP servers appear. `.claude/bin/claude-cmux` re-applies both flags and `exec`s the real binary.
 
+**Nothing to configure — `.app_env.sh` exports `CMUX_CUSTOM_CLAUDE_PATH`, so a `yadm pull` is the whole install.** Open a new surface and check:
+
+```bash
+echo $CMUX_CUSTOM_CLAUDE_PATH     # /Users/<you>/.claude/bin/claude-cmux
+claude                             # then /mcp — servers should be listed
 ```
-Settings > Automation > Claude Code > Claude Binary Path
-  -> /Users/<you>/.claude/bin/claude-cmux
-```
 
-**Must be absolute — `~` does not work.** cmux stores the field verbatim and checks it with `[[ -f "$custom" && -x "$custom" ]]`, which performs no tilde expansion. A `~/...` value fails that test, and cmux falls back to `$PATH` silently: the session starts, just without any of the flags. This setting lives in `~/Library/Preferences/com.cmuxterm.app.plist`, which is not tracked here, so set it per machine.
+The env var is deliberately preferred over Settings > Automation > Claude Code > Claude Binary Path. That field is stored verbatim in `~/Library/Preferences/com.cmuxterm.app.plist` (per-machine, untracked) and checked with `[[ -f "$custom" && -x "$custom" ]]` — a quoted variable gets no tilde expansion in bash, so **a `~/...` value silently fails** and cmux falls back to `$PATH`. The session still starts, just with no flags and no error. Set that field only as a fallback for surfaces cmux launches without an interactive shell, and give it an absolute path.
 
-Equivalent via env: `export CMUX_CUSTOM_CLAUDE_PATH="$HOME/.claude/bin/claude-cmux"` (the shell expands `$HOME` here, so this form is fine).
-
-`.claude/bin/claude-cmux` re-applies `--dangerously-skip-permissions --mcp-config ~/.claude/mcp.json` (matching the alias) and `exec`s the real binary. It walks `$PATH` by hand to skip cmux's own per-surface shim (`/tmp/cmux-cli-shims/…`) — a plain lookup finds the shim and loops. If `mcp.json` is still git-crypt locked it warns and starts without MCP rather than dying on a parse error.
+`claude-cmux` walks `$PATH` by hand to skip cmux's own per-surface shim (`/tmp/cmux-cli-shims/…`); a plain lookup finds the shim and loops until cmux's 16-hop guard trips. If `mcp.json` is still git-crypt locked it warns and starts without MCP rather than dying on an opaque parse error.
 
 | Env var | Effect |
 |---|---|
+| `CMUX_CUSTOM_CLAUDE_PATH` | Tells cmux to launch the wrapper (set in `.app_env.sh`) |
 | `CLAUDE_REAL_BIN` | Skip `$PATH` discovery, use this binary |
 | `CLAUDE_MCP_CONFIG` | Use a different MCP config than `~/.claude/mcp.json` |
 
 Subcommands (`claude mcp`, `claude update`, …) pass through unmodified — a global flag placed before a subcommand swallows it.
+
+### New machine
+
+```bash
+yadm clone git@luke-github.com:jinyuanlu/dotfiles.git   # branch: yadm
+yadm enter
+git-crypt unlock <key>       # from Proton Drive; also in the ~/Code/dotfiles clone
+~/.claude/skills/setup       # builds browse CLI
+```
+
+git-crypt must be unlocked separately in the yadm repo and in any dev clone. Until it is, `mcp.json` stays encrypted and `claude-cmux` starts without MCP servers (with a warning rather than a crash).
 
 ### How it works
 
