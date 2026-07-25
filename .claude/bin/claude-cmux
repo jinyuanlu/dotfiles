@@ -47,6 +47,9 @@ is_shim() {
 }
 
 # Walk PATH by hand: `command -v -a` is not valid bash (that's zsh/`type -aP`).
+# `printf '%s\n'`, not '%s': without the trailing newline `read` hits EOF on the
+# final field and returns non-zero, so the loop body never runs for the last
+# PATH entry. That silently hid a claude installed in the last directory.
 find_real_claude() {
   local dir candidate
   while IFS= read -r dir; do
@@ -56,12 +59,18 @@ find_real_claude() {
       printf '%s' "$candidate"
       return 0
     fi
-  done < <(printf '%s' "$PATH" | tr ':' '\n')
+  done < <(printf '%s\n' "$PATH" | tr ':' '\n')
   return 1
 }
 
 REAL="${CLAUDE_REAL_BIN:-$(find_real_claude || true)}"
-[[ -n $REAL ]] || die 'real claude binary not found on PATH (set CLAUDE_REAL_BIN)' 127
+if [[ -z $REAL ]]; then
+  # Report what was searched — this runs on machines we cannot inspect.
+  warn 'real claude binary not found. Set CLAUDE_REAL_BIN=/path/to/claude, or'
+  warn 'install Claude Code on this machine. Searched these PATH entries:'
+  printf '%s\n' "$PATH" | tr ':' '\n' | sed 's/^/  /' >&2
+  exit 127
+fi
 
 # --- Subcommand passthrough --------------------------------------------------
 # A global flag placed before a subcommand swallows it: `claude --mcp-config X
