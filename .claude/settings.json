@@ -1,0 +1,58 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__serena__*",
+      "mcp__memory__*",
+      "mcp__sequential-thinking__*",
+      "mcp__context7__*",
+      "WebSearch",
+      "WebFetch"
+    ],
+    "defaultMode": "auto"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME\"/.claude/hooks/validate-worktree-branch.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "frontend-design@claude-plugins-official": true,
+    "skill-creator@claude-plugins-official": true,
+    "gopls-lsp@claude-plugins-official": true,
+    "autoresearch@autoresearch": true,
+    "last30days@last30days-skill": true,
+    "compound-engineering@compound-engineering-plugin": true
+  },
+  "extraKnownMarketplaces": {
+    "autoresearch": {
+      "source": {
+        "source": "github",
+        "repo": "uditgoenka/autoresearch"
+      }
+    },
+    "last30days-skill": {
+      "source": {
+        "source": "github",
+        "repo": "mvanhorn/last30days-skill"
+      }
+    },
+    "compound-engineering-plugin": {
+      "source": {
+        "source": "github",
+        "repo": "EveryInc/compound-engineering-plugin"
+      }
+    }
+  },
+  "effortLevel": "xhigh",
+  "skipDangerousModePermissionPrompt": true,
+  "agentPushNotifEnabled": true,
+  "skipAutoPermissionPrompt": true
+}

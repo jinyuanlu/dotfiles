@@ -1,0 +1,31 @@
+#!/bin/sh
+# Auto-link the git-crypt key into new worktrees.
+#
+# git-crypt 0.8.0 looks for its key under the *current* git-dir, but the key
+# only lives in the common git-dir. So fresh worktrees check out the encrypted
+# files as ciphertext (smudge falls back to `cat`) and every later
+# status/add/commit fails on the strict clean filter.
+#
+# `git worktree add` fires this post-checkout hook in the new worktree, so we
+# link the key once and re-smudge the encrypted files. Guarded so it does
+# nothing in the main repo or on ordinary branch/file checkouts.
+#
+# Enabled via `core.hooksPath = .githooks` (see bin/setup-git-hooks).
+
+git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || exit 0
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+
+# Only act in a worktree (git_dir != common_dir) that lacks the key link,
+# and only when the common dir actually has a key to link to.
+[ "$git_dir" = "$common_dir" ] && exit 0
+[ -e "$git_dir/git-crypt" ] && exit 0
+[ -e "$common_dir/git-crypt" ] || exit 0
+
+ln -sfn "$common_dir/git-crypt" "$git_dir/git-crypt"
+
+# Re-decrypt the files that were checked out as ciphertext before the key existed.
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+patterns=$(awk '/filter=git-crypt/{print $1}' "$toplevel/.gitattributes" 2>/dev/null)
+[ -n "$patterns" ] && git checkout -- $patterns 2>/dev/null
+
+exit 0
