@@ -194,3 +194,4 @@ unset __conda_setup
 # <<< conda initialize <<<
 
 [ -f "/Users/admin/.ghcup/env" ] && . "/Users/admin/.ghcup/env" # ghcup-env
+export PATH=/opt/homebrew/share/google-cloud-sdk/bin:"$PATH"

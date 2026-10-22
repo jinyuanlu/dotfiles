@@ -10,7 +10,7 @@
     ],
     "defaultMode": "auto"
   },
-  "model": "claude-fable-5-1[1m]",
+  "model": "opus",
   "hooks": {
     "PreToolUse": [
       {
@@ -30,7 +30,8 @@
     "gopls-lsp@claude-plugins-official": true,
     "autoresearch@autoresearch": true,
     "last30days@last30days-skill": true,
-    "compound-engineering@compound-engineering-plugin": true
+    "compound-engineering@compound-engineering-plugin": true,
+    "ponytail@ponytail": true
   },
   "extraKnownMarketplaces": {
     "autoresearch": {
@@ -50,11 +51,18 @@
         "source": "github",
         "repo": "EveryInc/compound-engineering-plugin"
       }
+    },
+    "ponytail": {
+      "source": {
+        "source": "github",
+        "repo": "DietrichGebert/ponytail"
+      }
     }
   },
   "effortLevel": "xhigh",
   "tui": "fullscreen",
   "skipDangerousModePermissionPrompt": true,
+  "switchModelsOnFlag": false,
   "agentPushNotifEnabled": true,
   "skipAutoPermissionPrompt": true
 }
