@@ -27,3 +27,7 @@ See `src/rime/install.sh`
 ** Usage: Hammerspoon
 
 See `src/hammerspoon/install.sh`.
+
+** Usage: Emacs
+
+`~/.emacs.d` is tracked by yadm (branch `yadm`), not this branch. Install with `brew trust d12frosted/emacs-plus && brew install emacs-plus@30`, then `yadm pull`.
