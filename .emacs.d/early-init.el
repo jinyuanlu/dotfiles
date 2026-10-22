@@ -10,6 +10,11 @@
 
 (setq package-enable-at-startup nil)
 
+;; Third-party lint from background native-comp is noise, not actionable:
+;; keep it logged in *Warnings* but never pop the window. (On 30.2,
+;; `native-comp-async-report-warnings-errors' 'silent did not stop it.)
+(setq warning-suppress-types '((native-compiler)))
+
 ;; So we can detect this having been loaded
 (provide 'early-init)
 

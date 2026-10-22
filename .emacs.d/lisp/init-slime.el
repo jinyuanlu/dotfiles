@@ -2,6 +2,10 @@
 ;;; Commentary:
 ;;; Code:
 
+;; slime's contrib/slime-xterm-color.el runs (use-package xterm-color :ensure t)
+;; while being byte-compiled; on Emacs 30 that records a symbol-with-position
+;; in `package-selected-packages' and breaks the next install. Pre-install it.
+(require-package 'xterm-color)
 (require-package 'slime)
 (push (expand-file-name "contrib" (file-name-directory (locate-library "slime"))) load-path)
 
