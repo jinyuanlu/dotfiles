@@ -1,0 +1,15 @@
+#!/bin/bash
+
+echo "Installing homebrew"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install.sh)"
+brew install yadm
+
+yadm clone https://github.com/jinyuanlu/dotfiles.git
+
+echo "Setting up pipx packages..."
+# Run pipx setup from the cloned dotfiles
+if [ -x "$HOME/bin/setup-pipx" ]; then
+    "$HOME/bin/setup-pipx"
+else
+    echo "Warning: setup-pipx script not found or not executable"
+fi

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# No-op stub — replaces gstack-telemetry-log.
+# Skill activations are already logged inline via skill-usage.jsonl.
+exit 0

@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+#
+# claude-cmux — target for cmux's "Claude Binary Path".
+#
+#   cmux Settings > Automation > Claude Code > Claude Binary Path
+#     -> /Users/<you>/.claude/bin/claude-cmux
+#
+# The path must be ABSOLUTE. cmux stores the field verbatim and tests it with
+# [[ -f "$custom" ]], which does not expand `~`; a tilde path fails the test and
+# cmux falls back to $PATH silently, so none of this runs.
+#
+# Why this exists: cmux exec's the agent binary directly, so the interactive
+# `claude` alias in ~/.aliases.sh never applies. This re-applies the same flags
+# and then exec's the real binary, replacing itself in the process table.
+#
+set -euo pipefail
+
+readonly SELF=claude-cmux
+readonly MCP_CONFIG="${CLAUDE_MCP_CONFIG:-$HOME/.claude/mcp.json}"
+
+warn() { printf '%s: %s\n' "$SELF" "$1" >&2; }
+die() { warn "$1"; exit "${2:-1}"; }
+
+# --- Resolve the real binary -------------------------------------------------
+# cmux prepends its own per-surface `claude` shim to PATH, so a naive PATH
+# lookup re-enters the shim forever. Reject: ourselves, the shim cmux declared
+# via env, the temp shim dirs, and the copy inside the app bundle. Mirrors
+# cmux-claude-wrapper's own `is_self_or_shim` check.
+is_shim() {
+  local candidate=$1
+
+  [[ -e $candidate && $candidate -ef ${BASH_SOURCE[0]} ]] && return 0
+
+  [[ -n ${CMUX_CLAUDE_WRAPPER_SHIM:-} &&
+     -e $candidate &&
+     -e ${CMUX_CLAUDE_WRAPPER_SHIM} &&
+     $candidate -ef ${CMUX_CLAUDE_WRAPPER_SHIM} ]] && return 0
+
+  [[ -n ${CMUX_CLAUDE_WRAPPER_SHIM_ROOT:-} &&
+     $candidate == "${CMUX_CLAUDE_WRAPPER_SHIM_ROOT%/}/claude" ]] && return 0
+
+  case $candidate in
+    */cmux-cli-shims/*|*/cmux.app/*|*/Contents/Resources/bin/claude) return 0 ;;
+  esac
+
+  return 1
+}
+
+# Walk PATH by hand: `command -v -a` is not valid bash (that's zsh/`type -aP`).
+# `printf '%s\n'`, not '%s': without the trailing newline `read` hits EOF on the
+# final field and returns non-zero, so the loop body never runs for the last
+# PATH entry. That silently hid a claude installed in the last directory.
+find_real_claude() {
+  local dir candidate
+  while IFS= read -r dir; do
+    candidate="${dir:-.}/claude"
+    is_shim "$candidate" && continue
+    if [[ -f $candidate && -x $candidate ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done < <(printf '%s\n' "$PATH" | tr ':' '\n')
+  return 1
+}
+
+REAL="${CLAUDE_REAL_BIN:-$(find_real_claude || true)}"
+if [[ -z $REAL ]]; then
+  # Report what was searched — this runs on machines we cannot inspect.
+  warn 'real claude binary not found. Set CLAUDE_REAL_BIN=/path/to/claude, or'
+  warn 'install Claude Code on this machine. Searched these PATH entries:'
+  printf '%s\n' "$PATH" | tr ':' '\n' | sed 's/^/  /' >&2
+  exit 127
+fi
+
+# --- Subcommand passthrough --------------------------------------------------
+# A global flag placed before a subcommand swallows it: `claude --mcp-config X
+# mcp list` prints top-level help instead of listing servers. Pass these through
+# untouched. Refresh from the `Commands:` block of `claude --help`.
+case ${1:-} in
+  agents|auth|auto-mode|doctor|gateway|install|mcp|plugin|plugins|project|\
+  setup-token|ultrareview|update|upgrade|-v|--version|-h|--help)
+    exec "$REAL" "$@"
+    ;;
+esac
+
+# --- Inject the alias flags --------------------------------------------------
+# Mirrors the `claude` alias in ~/.aliases.sh.
+flags=(--dangerously-skip-permissions)
+
+if [[ -f $MCP_CONFIG ]]; then
+  # mcp.json is git-crypt'd; while locked it is binary and claude dies on an
+  # opaque parse error. Degrade to a working session without MCP instead.
+  # Piped, not `$(...)`: a locked file starts with NUL and bash warns on that.
+  if head -c 1 "$MCP_CONFIG" 2>/dev/null | LC_ALL=C grep -q '{'; then
+    flags+=(--mcp-config "$MCP_CONFIG")
+  else
+    warn "$MCP_CONFIG is still git-crypt locked — starting without MCP servers"
+  fi
+fi
+
+exec "$REAL" ${flags[@]+"${flags[@]}"} "$@"

@@ -1,0 +1,16 @@
+#!/bin/bash
+# Enable this repo's version-controlled git hooks (.githooks/).
+#
+# Run once after cloning the dev repo. Idempotent — safe to re-run.
+# The post-checkout hook auto-links the git-crypt key into new worktrees so
+# `git worktree add` produces a clean, decrypted tree with no manual steps.
+#
+#   bin/setup-git-hooks
+#
+set -euo pipefail
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+git config core.hooksPath .githooks
+echo "core.hooksPath -> .githooks   (hooks now version-controlled in $root/.githooks)"

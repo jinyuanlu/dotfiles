@@ -1,0 +1,42 @@
+#!/bin/bash
+
+set -euo pipefail
+
+echo "Setting up pipx packages..."
+
+# Ensure pipx is installed (via Homebrew)
+if ! command -v pipx &> /dev/null; then
+    echo "pipx not found. Installing via Homebrew..."
+    brew install pipx
+fi
+
+# Ensure pipx is properly configured
+pipx ensurepath
+
+# Install packages from .pipx-packages file
+PIPX_PACKAGES_FILE="${HOME}/.pipx-packages"
+
+if [ -f "$PIPX_PACKAGES_FILE" ]; then
+    echo "Installing pipx packages from $PIPX_PACKAGES_FILE..."
+
+    while IFS= read -r package; do
+        # Skip empty lines and comments
+        if [[ -z "$package" ]] || [[ "$package" =~ ^# ]]; then
+            continue
+        fi
+
+        # Check if package is already installed
+        if pipx list | grep -q "^   package $package"; then
+            echo "  ✓ $package already installed"
+        else
+            echo "  Installing $package..."
+            pipx install "$package"
+        fi
+    done < "$PIPX_PACKAGES_FILE"
+
+    echo "✅ All pipx packages installed successfully"
+else
+    echo "No .pipx-packages file found at $PIPX_PACKAGES_FILE"
+fi
+
+echo "pipx setup complete!"

@@ -1,0 +1,20 @@
+tmux quick reference
+────────────────────
+prefix + |       split vertical
+prefix + -       split horizontal
+prefix + arrow   move between panes
+prefix + z       zoom pane (toggle fullscreen)
+prefix + x       close pane (or type 'exit' / Ctrl-D)
+prefix + d       detach session
+prefix + [       scroll mode (q to exit)
+prefix + h       this help
+
+mt (metatree) panes
+────────────────────
+prefix + g       switch worktree (fast)
+prefix + G       switch worktree (full picker)
+prefix + N       new worktree
+prefix + R       remove worktree
+
+mouse mode is on — right-click a pane for a menu.
+press q to close this popup.

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -e
+DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$DIR"
+
+# Check for bun
+if ! command -v bun &>/dev/null; then
+  echo "bun not found. Install: curl -fsSL https://bun.sh/install | bash"
+  exit 1
+fi
+
+echo "Installing dependencies..."
+bun install --frozen-lockfile 2>/dev/null || bun install
+
+echo "Building browse binary..."
+bun build --compile src/cli.ts --outfile dist/browse
+bun build --compile src/find-browse.ts --outfile dist/find-browse
+
+echo "Installing Chromium for Playwright..."
+bunx playwright install chromium
+
+echo "Browse CLI ready: $DIR/dist/browse"

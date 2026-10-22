@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# No-op stub — replaces gstack-update-check.
+# Empty output = no update available. Skills check for UPGRADE_AVAILABLE in stdout.
+exit 0

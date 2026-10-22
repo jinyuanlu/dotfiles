@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -e
+SKILLS_DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "Building browse CLI..."
+"$SKILLS_DIR/browse/setup"
+mkdir -p "$HOME/.gstack/projects" "$HOME/.gstack/analytics"
+echo "Skills ready."
