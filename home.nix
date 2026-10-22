@@ -82,7 +82,7 @@
   # changes in each release.xf
   home.stateVersion = "23.05";
 
-  imports = [ ./programs/emacs/emacs.nix ./programs/zsh/default.nix ];
+  imports = [ ./programs/zsh/default.nix ];
 
   # Let Home Manager install and manage itself.
   programs.home-manager.enable = true;

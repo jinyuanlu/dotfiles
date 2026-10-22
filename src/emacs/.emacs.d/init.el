@@ -34,7 +34,7 @@
 ;; Bootstrap config
 
 
-(setq custom-file (locate-user-emacs-file "~/.emacs.d/custom.el"))
+(setq custom-file (locate-user-emacs-file "custom.el"))
 
 (require 'init-utils)
 (require 'init-site-lisp) ;; Must come before elpa, as it may provide package.el
@@ -82,6 +82,8 @@
 
 (require 'init-projectile)
 
+(require 'init-ada)
+(require 'init-tla)
 (require 'init-bazel)
 (require 'init-compile)
 (require 'init-coq)
@@ -89,7 +91,6 @@
 (require 'init-textile)
 (require 'init-markdown)
 (require 'init-csv)
-(require 'init-erlang)
 (require 'init-javascript)
 (require 'init-php)
 (require 'init-go)
@@ -122,8 +123,6 @@
 (require 'init-paredit)
 (require 'init-lisp)
 (require 'init-slime)
-(require 'init-clojure)
-(require 'init-clojure-cider)
 (require 'init-common-lisp)
 
 (when *spell-check-support-enabled*
@@ -156,6 +155,7 @@
   (add-hook 'after-init-hook 'global-eldoc-mode))
 
 (require 'init-direnv)
+(require 'init-claude-code)
 
 
 

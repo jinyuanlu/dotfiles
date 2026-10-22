@@ -9,7 +9,6 @@
   (fullframe docker-networks tablist-quit)
   (fullframe docker-containers tablist-quit))
 (maybe-require-package 'dockerfile-mode)
-(maybe-require-package 'docker-compose-mode)
 
 
 (provide 'init-docker)
