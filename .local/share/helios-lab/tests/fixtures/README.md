@@ -98,3 +98,10 @@ they print only IDs. The tests build these inline and mark each one:
   so there is nothing to capture; instead `remote.test.sh` runs the helper's
   own provisioning (stages faked) and checks its output is exactly this shape.
   Journal lines, and ssh's own error messages, are hand-written too.
+- the guest (U3): `helios-lab-host status` replies (`../lib.sh`
+  `guest_status_reply`), checked against the helper's own `status` the same
+  way in `guest.test.sh`; and what the guest itself prints, which the spike
+  observed but did not capture: `uname -o`'s `illumos`, dtrace's stdout for
+  a `BEGIN` probe that exits, the end of the first-boot console transcript
+  (`INFO ok, run complete`, `Hostname: helios`), and `virsh domstate` lines.
+  The guest's DHCP address is in libvirt's default `192.168.122.0/24`.

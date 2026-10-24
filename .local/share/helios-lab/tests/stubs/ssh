@@ -6,17 +6,22 @@
 # here, so no test ever connects anywhere.
 #
 # Call contract (lib/remote.sh; exit 98 otherwise):
-#   ssh -F <existing file> <host|guest> <one remote command>
+#   ssh -F <existing file> [-t] [-o ConnectTimeout=N] [-o BatchMode=yes] <host|guest> [<one remote command>]
 # -F first, and the fragment must already exist: no call can bypass it, and
-# none can pass by running before the fragment was written.
+# none can pass by running before the fragment was written. Only those
+# options may follow it (the console's -t, status's 3-second probe).
 #
 # Reply name: ssh-<alias>-<program>. <program> is the remote command's first
-# word after an optional `sudo`, without its directory; for the host helper,
-# its subcommand instead:
+# word after an optional `sudo` or `pfexec`, without its directory; for the
+# host helper, its subcommand instead; `login` when there is no command:
 #   sudo bash -c '...'                                      ssh-host-bash (the push)
 #   sudo systemctl start helios-lab-provision.service       ssh-host-systemctl
 #   /usr/local/libexec/helios-lab/helios-lab-host progress  ssh-host-progress
 #   sudo /usr/local/.../helios-lab-host journal 20          ssh-host-journal
+#   sudo /usr/local/.../helios-lab-host status              ssh-host-status
+#   uname -o                                                ssh-guest-uname
+#   pfexec dtrace -n '...'                                  ssh-guest-dtrace
+#   (none: helios-lab ssh)                                  ssh-guest-login
 # Files, sequences (<name>.N) and the exit-97 "no reply" rule:
 # tests/stub-replay.sh. Each call's stdin is saved as <dir>/.stdin/<name>.<N>
 # (the push's bundle), so tests can unpack exactly what the host would get.
@@ -28,25 +33,39 @@ set -euo pipefail
 # shellcheck source=../stub-replay.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../stub-replay.sh"
 
-contract_fail() { printf 'stub ssh: %s: ssh %s\n' "$1" "${*:2}" >&2; exit 98; }
+all=("$@")
+contract_fail() { printf 'stub ssh: %s: ssh %s\n' "$1" "${all[*]}" >&2; exit 98; }
 
-# reply_name <alias> <remote command>
+# reply_name <alias> [remote command]
 reply_name() {
   local word sub rest
+  (( $# > 1 )) || { echo "ssh-$1-login"; return 0; }
   read -r word sub rest <<< "$2"
-  [[ $word != sudo ]] || read -r word sub rest <<< "$sub $rest"
+  case $word in sudo|pfexec) read -r word sub rest <<< "$sub $rest" ;; esac
   word=${word##*/}
   [[ $word != helios-lab-host ]] || word=$sub
   echo "ssh-$1-$word"
 }
 
 stub_record ssh "$@"
-(( $# == 4 )) || contract_fail 'expected: -F <file> <host|guest> <command>' "$@"
-[[ $1 == -F && -f $2 ]] || contract_fail '-F <existing fragment> must come first' "$@"
-[[ $3 == host || $3 == guest ]] || contract_fail 'the alias must be host or guest' "$@"
+[[ ${1:-} == -F && -f ${2:-} ]] || contract_fail '-F <existing fragment> must come first'
+shift 2
+while (( $# > 0 )); do
+  case $1 in
+    -t) shift ;;
+    -o) case ${2:-} in
+          ConnectTimeout=[1-9]|ConnectTimeout=[1-9][0-9]|BatchMode=yes) shift 2 ;;
+          *) contract_fail "option not allowed: -o ${2:-}" ;;
+        esac ;;
+    -*) contract_fail "option not allowed: $1" ;;
+    *)  break ;;
+  esac
+done
+(( $# == 1 || $# == 2 )) || contract_fail 'expected: <host|guest> [<one remote command>] after the options'
+[[ $1 == host || $1 == guest ]] || contract_fail 'the alias must be host or guest'
 
 dir=${STUB_SSH_DIR:?STUB_SSH_DIR is not set}
-name=$(reply_name "$3" "$4")
+name=$(reply_name "$@")
 n=$(( $(cat "$dir/.calls/$name" 2>/dev/null || echo 0) + 1 ))   # the number stub_replay gives this call
 mkdir -p "$dir/.stdin"
 cat > "$dir/.stdin/$name.$n"

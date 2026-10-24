@@ -116,9 +116,10 @@ render_root_device() {
 # key, and destroy needs no known_hosts cleanup. UseKeychain exists only in
 # Apple's ssh; IgnoreUnknown keeps another ssh on PATH from refusing the file.
 # Fails on an ID, IP or path it can't render safely.
-# Known limit (for U3): ssh builds the ProxyJump hop as a shell command with
-# the -F path unquoted, so the guest alias needs a state-dir path without
-# spaces or shell metacharacters. The host alias has no such limit.
+# Known limit: ssh builds the ProxyJump hop as a shell command with the -F
+# path unquoted, so the guest alias needs a state-dir path without spaces or
+# shell metacharacters (jump_safe_path; up and `ssh guest` check it first).
+# The host alias has no such limit.
 render_ssh_config() {
   local key kh
   [[ $1 =~ ^i-[0-9a-f]+$ ]] && is_ipv4 "$2" || return 1
@@ -140,6 +141,10 @@ ssh_common() {
   printf '  %s\n' 'User ubuntu' "IdentityFile $1" 'IdentitiesOnly yes' 'AddKeysToAgent yes' 'UseKeychain yes' \
     "UserKnownHostsFile $2" 'ForwardAgent no' 'ServerAliveInterval 60' 'ConnectTimeout 15'
 }
+
+# jump_safe_path <path> -> 0 when ssh's ProxyJump can carry it as -F: an
+# absolute path of letters, digits and / . _ - only, which no shell splits
+jump_safe_path() { [[ $1 =~ ^/[A-Za-z0-9/._-]+$ ]]; }
 
 # ssh_config_path <absolute path> -> the path as one ssh_config argument:
 # double-quoted (a HOME with spaces), with % doubled, because IdentityFile and

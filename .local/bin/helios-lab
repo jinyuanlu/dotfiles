@@ -32,11 +32,15 @@
 #      never printed, the console shows no fingerprints in time, or a pinned
 #      host now offers another key. Never answered by trusting on first use.
 #   8  network: AWS, checkip or the host's ssh unreachable
+# `ssh` and `console` hand over to ssh once connected, so from then on the
+# exit status is ssh's: the remote command's, or 255 for ssh's own failure.
 #
 # Env (the only knobs; region, root size and key path are constants):
 #   HELIOS_LAB_PROFILE        AWS profile (default: helios-lab)
 #   HELIOS_LAB_INSTANCE_TYPE  instance type, applied only at create (default: m8i.xlarge)
 #   HELIOS_LAB_IDLE_MINUTES   idle minutes before the host stops itself (default: 60)
+# HELIOS_LAB_STATE_DIR (state dir) is also the way out when the default one's
+# path holds characters ssh's ProxyJump can't carry (up says so).
 # For tests: HELIOS_LAB_HOME (library dir), HELIOS_LAB_STATE_DIR (state dir),
 # HELIOS_LAB_RETRY_SECONDS (wait between attempts of every retry and poll:
 # security-group delete, console fingerprints, host key, provision progress;
@@ -265,52 +269,77 @@ status_absent() {
   status_headline absent
 }
 
-# status_one <row>
+# status_one <row> — a running host is also probed over ssh (U3): one
+# 3-second, read-only look at its provisioning and its guest
+# (lib/remote.sh host_probe), and only when this Mac's IP is allowed. The
+# probe goes first, so its anomalies print above the headline too.
 status_one() {
-  local id state type az ip launch group code reason now
+  local id state type az ip launch group code reason now access='' probe=''
   IFS=$US read -r id state type az ip launch group code reason <<< "$1"
   now=$(date +%s)
-  status_anomalies "$state" "$group" "$reason" "$now"
+  if [[ $state == running ]]; then
+    access=$(caller_access "$group") || return
+    probe=$(host_probe "$id" "$ip" "$access")
+  fi
+  status_anomalies "$state" "$reason" "$now" "$access"
+  probe_anomalies "$probe"
   status_headline "$state" "$type" "$(uptime_s "$launch" "$now")" \
-    "$(stop_cause "$code" "$reason")" '' "$(autostop_field "$IDLE_MINUTES")"
+    "$(stop_cause "$code" "$reason")" "$(guest_headline_field "$state" "$id" "$probe")" "$(autostop_field "$IDLE_MINUTES")"
   status_details "$id" "$az" "$type" "$ip"
-  # --- Extension point (U3/U4) ---
-  # Host and guest fields (provision stage, guest state and pin/sizing
-  # mismatch, idle countdown, keep-until, failed idle run) come from 3-second
-  # SSH probes and append here; U3 also passes the guest field to
-  # status_headline. They must stay read-only, like everything in status.
+  [[ $state != running ]] || probe_details "$probe"
+  # --- Extension point (U4) ---
+  # The idle countdown, keep-until and a failed idle run come from the same
+  # probe; U4 replaces the autostop field above with the host's own countdown.
+  # They must stay read-only, like everything in status.
 }
 
-# status_anomalies <state> <group-id> <reason> <now>
+# status_anomalies <state> <reason> <now> <caller access>
 status_anomalies() {
   local stuck
   case $1 in
-    stopping) if stuck=$(stuck_for "$3" "$4"); then anomaly stuck-stopping "$stuck"; fi ;;
-    running)  ip_anomaly "$2" ;;
+    stopping) if stuck=$(stuck_for "$2" "$3"); then anomaly stuck-stopping "$stuck"; fi ;;
+    running)  case $4 in
+                denied*) anomaly ip-not-allowed "${4#denied }" ;;
+                unknown) anomaly ip-unknown ;;
+              esac ;;
   esac
 }
 
-# ip_anomaly <group-id> — only a running host is connectable, so only then does
-# a stale ingress rule matter. A failed IP lookup is itself an anomaly.
-ip_anomaly() {
+# caller_access <group-id> -> allowed | denied <ipv4> | unknown | none.
+# Only a running host is connectable, so only then does a stale ingress
+# rule matter. A failed IP lookup is itself an anomaly (unknown).
+caller_access() {
   local ip rules
-  [[ $1 != None ]] || return 0
-  if ! ip=$(caller_ip); then
-    anomaly ip-unknown
-    return 0
-  fi
-  rules=$(aws_ingress_rules "$1")
-  ingress_allows "$ip" "$rules" || anomaly ip-not-allowed "$ip"
+  [[ $1 != None && -n $1 ]] || { echo none; return 0; }
+  ip=$(caller_ip) || { echo unknown; return 0; }
+  rules=$(aws_ingress_rules "$1") || return
+  if ingress_allows "$ip" "$rules"; then echo allowed; else echo "denied $ip"; fi
+}
+
+# guest_headline_field <state> <instance-id> <probe> -> the headline's guest
+# field: a running host's from its probe; a stopped host can't be asked,
+# but stop keeps the disk, so a guest this Mac has reached (its alias is
+# pinned, which only a reached guest leaves, and up drops for any guest not
+# verified yet) is intact; otherwise nothing
+guest_headline_field() {
+  case $1 in
+    running) [[ $(probe_kind "$3") != ok ]] || guest_field "$(probe_body "$3")" ;;
+    stopped) if hostkey_pinned "$2-guest"; then echo 'guest intact'; fi ;;
+  esac
 }
 
 # --- up ----------------------------------------------------------------------
 # Converges from any EC2 state to "host running" by the state machine in
-# state.sh (up_action), then bootstraps the host (up_connect). -v adds the
-# host's provisioning journal; UP_VERBOSE is set once, here, and only read.
+# state.sh (up_action), then bootstraps the host and boots the guest
+# (up_connect). -v adds the host's provisioning journal. UP_VERBOSE and
+# UP_STARTED (for the ready screen's elapsed time) are set once, here, and
+# only read.
 cmd_up() {
-  local mode
+  local mode started
   mode=$(up_mode "$@")
-  readonly UP_VERBOSE=$mode
+  started=$(date +%s)
+  readonly UP_VERBOSE=$mode UP_STARTED=$started
+  require_jump_safe
   lock_acquire
   local row id state type az ip launch rest
   row=$(discover_single)
@@ -446,7 +475,7 @@ up_launch() {
   up_running "$id" "$started"
 }
 
-# up_start <instance-id> <type> <az>
+# up_start <instance-id> <type> <az> [connect] — [connect] as up_running's
 up_start() {
   local started
   started=$(date +%s)
@@ -454,13 +483,14 @@ up_start() {
   arm_notice '' "$2" ''
   aws_start "$1" "$2" "$3"
   arm_notice "$1" "$2" "$started"
-  up_running "$1" "$started"
+  up_running "$1" "$started" "${4:-up_connect_following}"
 }
 
-# up_running <instance-id> <started-epoch|""> — wait for running, then the
-# post-launch re-lookup. Invariant: at most one live tagged instance; a
-# duplicate (another Mac's concurrent up, say) exits 4 and is never resolved
-# automatically.
+# up_running <instance-id> <started-epoch|""> [connect] — wait for running,
+# then the post-launch re-lookup, then connect: up_connect_following, unless
+# a caller that already followed a stop names plain up_connect. Invariant: at
+# most one live tagged instance; a duplicate (another Mac's concurrent up,
+# say) exits 4 and is never resolved automatically.
 up_running() {
   aws_wait instance-running --instance-ids "$1"
   local row id state type az ip launch rest boot
@@ -472,19 +502,57 @@ up_running() {
   arm_notice "$id" "$type" "$boot"
   [[ -z $2 ]] || echo "instance $id running · $(fmt_elapsed $(( $(date +%s) - $2 )))"
   running_line "$id" "$ip" "$type" "$(deadman_epoch "$boot")"
-  up_connect "$row"
+  "${3:-up_connect_following}" "$row"
 }
 
-# up_connect <row> — the host bootstrap (U2). Runs once the instance is
-# running and the re-lookup has passed, with the billing notice armed, so
-# any failure here prints it. The host key is verified against the console
-# on first contact, the fragment is rendered for this IP, host/ and its
-# config are pushed (every up: R13), and the provision unit is started and
-# followed stage by stage. Invariant: from launch onward every boot has a
-# stop armed; until U4, nothing here touches the dead-man timer.
+# up_connect_following <row> — up_connect, and when ssh to the host fails on
+# the network (exit 8), EC2 is asked again (plan: Host lifecycle): an idle
+# poweroff can land between "saw running" and "connected", so that failure
+# is named rather than left to time out, and up follows the state machine.
+# up_connect runs in a subshell to catch its exit; errexit is set inside it,
+# because bash ignores -e in a subshell whose status is tested. The subshell
+# has no traps (bash resets them), so the billing notice prints once, here.
+up_connect_following() {
+  local rc
+  set +e
+  ( set -e; up_connect "$1" )
+  rc=$?
+  set -e
+  (( rc != 0 )) || return 0
+  (( rc == EX_NET )) || exit "$rc"
+  up_follow_stop "$1" "$rc"
+}
+
+# up_follow_stop <row> <exit status> — a host found stopping or stopped is
+# named, waited out and started again, then connected once more, without a
+# second follow. Anything else (still running, gone) keeps the ssh failure,
+# already reported, and its exit status.
+up_follow_stop() {
+  local row id state type az ip launch group code reason
+  row=$(discover_single)
+  IFS=$US read -r id state type az ip launch group code reason <<< "$row"
+  case $(up_action "${state:-absent}") in
+    wait-then-start) echo "$(stopped_while_connecting "$id" "$code" "$reason") · up follows it"
+                     up_wait "$id" instance-stopped stopping ;;
+    start)           echo "$(stopped_while_connecting "$id" "$code" "$reason") · up follows it" ;;
+    *)               exit "$2" ;;
+  esac
+  up_start "$id" "$type" "$az" up_connect
+}
+
+# up_connect <row> — the host bootstrap (U2), then the guest (U3). Runs once
+# the instance is running and the re-lookup has passed, with the billing
+# notice armed, so any failure here prints it. The host key is verified
+# against the console on first contact, the fragment is rendered for this
+# IP, host/ and its config are pushed (every up: R13), and the provision
+# unit is started and followed stage by stage: packages, libvirt, guard,
+# engvm, seed (with the RFD 26 line) and guest. Then the smoke check through
+# the guest alias (lib/remote.sh guest_bringup) and the ready screen.
+# Invariant: from launch onward every boot has a stop armed; until U4,
+# nothing here touches the dead-man timer.
 up_connect() {
-  local id state type az ip rest pushed
-  IFS=$US read -r id state type az ip rest <<< "$1"
+  local id state type az ip launch rest pushed
+  IFS=$US read -r id state type az ip launch rest <<< "$1"
   host_reach "$id" "$ip"
   pushed=$(host_push)
   push_line
@@ -492,12 +560,68 @@ up_connect() {
   provision_follow "$pushed"
   [[ ${UP_VERBOSE:-quiet} != verbose ]] || provision_journal_print
   echo 'host ready · KVM, libvirt and the metadata guard are in place'
-  # --- Extension point (U3/U4) ---
-  # U3: the provision run gains the engvm, seed and guest stages (followed
-  # above, the seed line with the RFD 26 link); then the smoke check through
-  # the guest alias and the ready screen replace the next line. U4: the push
-  # enables the idle timer, then disarms the dead-man timer.
-  echo 'next: helios-lab stop pauses billing · the Helios guest (U3) is not built yet'
+  guest_bringup "$id"
+  # --- Extension point (U4) ---
+  # The push enables the idle timer, then disarms the dead-man timer; the
+  # ready screen then names the idle countdown and keep (state.sh).
+  ready_screen "$(up_elapsed)" "$(deadman_epoch "$(launch_epoch "$launch" "$(date +%s)")")"
+}
+
+# up_elapsed -> seconds since this up started, or nothing outside cmd_up
+up_elapsed() { [[ -z ${UP_STARTED:-} ]] || echo $(( $(date +%s) - UP_STARTED )); }
+
+# require_jump_safe — the guest alias rides ProxyJump, and ssh builds that
+# hop as a shell command with the -F path unquoted (lib/render.sh). A state
+# dir that needs quoting would break the guest's ssh only at the very end of
+# up, after the host has billed for the whole build, so it is refused first.
+require_jump_safe() {
+  jump_safe_path "$SSH_CONFIG" || die "$EX_USAGE" \
+    "the state dir $STATE_DIR has characters ssh's ProxyJump can't pass on to reach the guest" \
+    'set HELIOS_LAB_STATE_DIR to an absolute path of letters, digits and / . _ - only'
+}
+
+# --- ssh and console ---------------------------------------------------------
+# Both reach a running host only. Explicit over implicit: against any other
+# state they refuse with the stop cause (U1) and never start the host, which
+# would bill. Like up they refresh ingress first (R10), check the lab key and
+# pin the host's key (host_reach), then hand the terminal to ssh. Their own
+# notices go to stderr, so `helios-lab ssh guest cmd > file` captures only
+# cmd's output. Neither takes the lock: they change nothing up guards.
+
+# cmd_ssh [guest|host] [cmd...] — the guest by default; extra words are the
+# remote command, joined as ssh joins them
+cmd_ssh() {
+  local alias command
+  alias=$(ssh_alias "$@")
+  command=$(ssh_command "$@")
+  [[ $alias != guest ]] || require_jump_safe
+  connect_running >&2
+  ssh_session "$alias" "$command"
+}
+
+# cmd_console — the guest's serial console, through the host (only host root
+# and the libvirt group can reach it). --force takes the console from any
+# other session, the first-boot transcript logger included: a guest whose
+# first boot loses its logger that way, before up verified it, is recreated
+# by the next up.
+cmd_console() {
+  (( $# == 0 )) || die "$EX_USAGE" 'console takes no arguments' "try: $SELF help"
+  connect_running >&2
+  console_session
+}
+
+# connect_running — the one live instance must be running; then the steps
+# every connecting command takes before its first ssh
+connect_running() {
+  local row id state type az ip launch group code reason
+  row=$(discover_single)
+  IFS=$US read -r id state type az ip launch group code reason <<< "$row"
+  [[ $state == running ]] || die "$EX_FAIL" "$(not_running_message "${state:-absent}" "$id" "$code" "$reason")" \
+    "$SELF ssh and console never start the host themselves: it bills while it runs"
+  lab_key_check "$id"
+  [[ -n $group && $group != None ]] || die "$EX_FAIL" "$id has no security group" 'helios-lab status shows the details'
+  ingress_refresh "$group"
+  host_reach "$id" "$ip"
 }
 
 # --- stop --------------------------------------------------------------------
@@ -652,7 +776,8 @@ main() {
     up)              cmd_up "$@" ;;
     stop)            cmd_stop "$@" ;;
     destroy)         cmd_destroy "$@" ;;
-    ssh|console)     not_yet U3 "$cmd" ;;
+    ssh)             cmd_ssh "$@" ;;
+    console)         cmd_console "$@" ;;
     keep)            not_yet U4 "$cmd" ;;
     runbook)         not_yet U5 "$cmd" ;;
     *)               die "$EX_USAGE" "unknown command: $cmd" "try: $SELF help" ;;

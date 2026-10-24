@@ -9,11 +9,18 @@
 #   /usr/local/libexec/helios-lab/helios-lab-host   this helper, 0755
 #   /etc/systemd/system/helios-lab-*.service        units from host/, 0644
 #   /etc/helios-lab/host.conf                       the Mac's settings, 0644
+#   /etc/helios-lab/engvm-lab.sh                    the guest's sizing, 0644
 # Written by provisioning:
 #   /var/lib/helios-lab/stage.<stage>   marker: the input the stage was built from
 #   /var/lib/helios-lab/progress        the current run's progress (protocol below)
 #   /etc/helios-lab/guard.nft and /etc/systemd/system/helios-lab-guard.service
 #                                       the metadata guard and its boot-time loader
+#   /home/ubuntu/helios-engvm           the engvm checkout at the pin, owned by
+#                                       ubuntu, with config/lab.sh and the seed
+#   /var/lib/helios-lab/guest.built     what the current guest was created from
+#   /var/log/helios-lab/console.log     the guest's first-boot console transcript
+# Written only on the Mac's word, after its smoke check passed:
+#   /var/lib/helios-lab/guest-verified  the guest marker (single-marker protocol)
 #
 # Subcommands:
 #   install <dir>    place the pushed files, reload systemd, print the epoch (root; the push)
@@ -21,17 +28,34 @@
 #   progress-reset   empty the progress file (root; the unit's ExecStartPre)
 #   progress         print the progress file and the unit's state (the Mac polls)
 #   journal [n|all]  the current run's journal lines (root; the Mac, on failure or -v)
+#   status           progress, then the guest's state (sudo; up's poll, status's
+#                    probe); read-only, like `helios-lab status` itself
+#   guest-verified   record the guest as verified, free its console, autostart
+#                    it (root; the Mac, once its smoke check passed)
+#   guest-abandon    stop an unverified first boot's create unit, so the next
+#                    provision run recreates the guest (root; the Mac, when the
+#                    first boot never passed the smoke check)
 # Start provisioning only through the unit (systemctl start
 # helios-lab-provision): it empties the progress file first, and a second run
 # can't start while one is active. The lock covers a run started by hand.
 #
-# Stages, in order: packages, libvirt, guard (U3 appends engvm, seed, guest).
+# Stages, in order: packages, libvirt, guard, engvm, seed, guest.
 # A stage that succeeds records its INPUT in its marker: a hash of everything
 # it applies (stage_spec). The next run skips the stage only when the
 # recorded input equals the pushed one (stage_decision) and its live check
 # still passes (a reboot can lose what a stage set up). So a changed helper
 # or setting re-applies (R13), a failed or interrupted stage runs again, and
-# re-running provision on a completed host skips every stage.
+# re-running provision on a completed host skips every stage but guest.
+#
+# The guest stage has no stage marker. It follows the single-marker protocol
+# (plan: "Host and guest"), keyed on guest-verified, which only the Mac's
+# smoke check leads to:
+#   verified                       -> ensure the domain runs (and autostarts)
+#   unverified, create unit active -> a first boot is under way: leave it
+#   unverified otherwise           -> engvm destroy.sh, then create.sh
+# Invariant: a verified guest is never destroyed or recreated here. A pushed
+# pin or sizing that differs from what it was built with is reported (the
+# stage summary, and the Mac's status and up), never applied.
 #
 # Progress protocol (lib/remote.sh parses it; keep both in step). One line
 # per event, appended to the progress file and printed to the journal:
@@ -62,9 +86,32 @@ readonly SERVICE=helios-lab-provision.service
 readonly GUARD_SERVICE=helios-lab-guard.service
 readonly GUARD_RULES=/etc/helios-lab/guard.nft   # as the guard unit names it
 
-readonly STAGES='packages libvirt guard'
+readonly STAGES='packages libvirt guard engvm seed guest'
 readonly LAB_USER=ubuntu
 readonly LIBVIRT_URI=qemu:///system
+
+# helios-engvm (R6): cloned and run as ubuntu, so the checkout, the seed
+# download and the create share one owner and git's ownership check passes.
+readonly ENGVM_REPO=https://github.com/oxidecomputer/helios-engvm.git
+readonly ENGVM_HOME=/home/$LAB_USER/helios-engvm   # as the host sees it
+readonly ENGVM_DIR=$ROOT_PREFIX$ENGVM_HOME
+readonly LAB_CONF_FILE=$CONF_DIR/engvm-lab.sh
+# download.sh links this name to the dated seed only once it is verified and
+# unpacked, so its presence is the seed stage's live check.
+readonly SEED_IMAGE=helios-qemu-ttya-full.raw
+# download.sh retries forever when curl fails; the stage bounds it. The spike
+# fetched, verified and unpacked the seed in 311 s.
+readonly SEED_TIMEOUT_S=1200
+readonly GUEST_VM=helios                          # engvm's default VM name
+readonly CREATE_UNIT=helios-lab-create.service    # transient: systemd-run --collect
+readonly LOG_DIR=$ROOT_PREFIX/var/log/helios-lab
+readonly TRANSCRIPT=$LOG_DIR/console.log
+readonly GUEST_BUILT=$MARKER_DIR/guest.built
+readonly GUEST_VERIFIED=$MARKER_DIR/guest-verified
+# create.sh uploads the 5 GB volume before it defines and starts the domain:
+# about a minute in the spike. The stage waits this long for it to run.
+readonly CREATE_WAIT_S=300
+readonly TRANSCRIPT_LINES=20   # what status shows of a first boot's console
 # helios-engvm needs Ubuntu's QEMU (its domain XML names pc-i440fx-focal);
 # libnss-libvirt resolves `helios` for the Mac's ProxyJump; cpu-checker gives
 # kvm-ok; cpio is engvm's; nftables loads the guard.
@@ -84,16 +131,24 @@ stage_decision() {
   if [[ -n $2 && $1 == "$2" ]]; then echo skip; else echo run; fi
 }
 
-# stage_spec <stage> -> the text a stage's input hashes: everything it
-# applies. The "rN" revision is bumped when a stage's code changes in a way
-# its spec doesn't show, so hosts re-run it.
+# stage_spec <stage> [host.conf text] [engvm-lab.sh text] -> the text a
+# stage's input hashes: everything it applies. The "rN" revision is bumped
+# when a stage's code changes in a way its spec doesn't show, so hosts re-run
+# it. engvm and seed take the pin from host.conf, engvm the sizing too; the
+# guest stage has no input (it is never skipped), so it fails here.
 stage_spec() {
+  local pin
   case $1 in
     packages) printf 'packages r1: %s\n' "$PACKAGES" ;;
     libvirt)  printf 'libvirt r1: %s in libvirt,kvm; %s; network default active+autostart; nss libvirt_guest\n' \
                 "$LAB_USER" "$LIBVIRT_URI"
               libvirt_guests_conf ;;
     guard)    echo 'guard r1'; guard_ruleset; guard_unit ;;
+    engvm)    pin=$(conf_get "${2:-}" ENGVM_PIN) || return 1
+              printf 'engvm r1: %s @ %s in %s as %s; config/lab.sh:\n%s\n' \
+                "$ENGVM_REPO" "$pin" "$ENGVM_HOME" "$LAB_USER" "${3:-}" ;;
+    seed)     pin=$(conf_get "${2:-}" ENGVM_PIN) || return 1
+              printf 'seed r1: download.sh @ %s as %s, timeout %ss\n' "$pin" "$LAB_USER" "$SEED_TIMEOUT_S" ;;
     *)        return 1 ;;
   esac
 }
@@ -113,10 +168,11 @@ sha256_hex() {
   fi
 }
 
-# stage_input <stage> -> the input the pushed code and config give that stage
+# stage_input <stage> [host.conf text] [engvm-lab.sh text] -> the input the
+# pushed code and config give that stage
 stage_input() {
   local spec
-  spec=$(stage_spec "$1") || return 1
+  spec=$(stage_spec "$@") || return 1
   spec_input "$spec"
 }
 
@@ -138,7 +194,7 @@ install_dest() {
   case $1 in
     helios-lab-host)                         echo "$LIBEXEC_DIR/$1 0755" ;;
     helios-lab-*.service|helios-lab-*.timer) echo "$SYSTEMD_DIR/$1 0644" ;;
-    host.conf)                               echo "$CONF_DIR/$1 0644" ;;
+    host.conf|engvm-lab.sh)                  echo "$CONF_DIR/$1 0644" ;;
     *)                                       return 1 ;;
   esac
 }
@@ -244,6 +300,115 @@ guard_unit() {
     '[Install]' 'WantedBy=sysinit.target' 'RequiredBy=libvirtd.service'
 }
 
+# --- Guest (pure) ------------------------------------------------------------
+# lab_sizing <engvm-lab.sh text> -> "3 vCPU, 8 GiB, 60G": the canonical
+# sizing, which a guest record keeps and a mismatch compares. Fails unless
+# the text sets VCPU, MEM and SIZE in the shipped forms and nothing else
+# (comments and blank lines aside): create.sh sources the file, so nothing
+# else may ride along, and a value it can't size a guest with fails here,
+# before any stage runs.
+readonly LAB_MEM_RE='^MEM=\$\(\( ([1-9][0-9]*) \* 1024 \* 1024 \)\)$'
+lab_sizing() {
+  local line vcpu='' mem='' size=''
+  while IFS= read -r line; do
+    case $line in
+      ''|'#'*) ;;
+      VCPU=*)  vcpu=${line#VCPU=} ;;
+      MEM=*)   [[ $line =~ $LAB_MEM_RE ]] || return 1
+               mem=${BASH_REMATCH[1]} ;;
+      SIZE=*)  size=${line#SIZE=} ;;
+      *)       return 1 ;;
+    esac
+  done <<< "$1"
+  [[ $vcpu =~ ^[1-9][0-9]?$ && -n $mem && $size =~ ^[1-9][0-9]{0,3}G$ ]] || return 1
+  echo "$vcpu vCPU, $mem GiB, $size"
+}
+
+# guest_action <verified: yes|no> <domain state> <create unit ActiveState>
+# -> keep | start | lost | odd | wait | create: the single-marker protocol.
+# <domain state> is virsh domstate's ("running", "shut off", ...), or absent
+# or unknown (domstate_of). Invariant: with the marker, the answer is never
+# create: a verified guest is only ever kept, started, or reported.
+guest_action() {
+  case $1:$2 in
+    yes:running)                 echo keep ;;
+    'yes:shut off'|yes:crashed)  echo start ;;
+    yes:absent)                  echo lost ;;
+    yes:*)                       echo odd ;;
+    no:*) case $3 in
+            active|activating)   echo wait ;;
+            *)                   echo create ;;
+          esac ;;
+    *)                           return 1 ;;
+  esac
+}
+
+# guest_record <pin> <sizing> -> guest.built and guest-verified: what a guest
+# was created from, as KEY=value lines (read back with conf_get)
+guest_record() { printf 'ENGVM_PIN=%s\nSIZING=%s\n' "$1" "$2"; }
+
+# record_field <record text> <ENGVM_PIN|SIZING> -> its value, or ? when unreadable
+record_field() { conf_get "$1" "$2" || echo '?'; }
+
+# kept_note <verified record> <pushed pin> <pushed sizing> -> the guest
+# stage's note when a verified guest was built from something else than the
+# push brings; nothing when they agree
+kept_note() {
+  local pin sizing
+  pin=$(record_field "$1" ENGVM_PIN)
+  sizing=$(record_field "$1" SIZING)
+  [[ $pin != "$2" || $sizing != "$3" ]] || return 0
+  echo "built from engvm @${pin:0:7}, $sizing, not the pushed @${2:0:7}, $3: kept, only a re-create applies it"
+}
+
+# seed_verdict <download.sh exit status, under timeout> -> ok | timeout | failed
+# timeout(1) exits 124 when it had to stop the command: download.sh itself
+# never gives up on a failing curl.
+seed_verdict() {
+  case $1 in
+    0)   echo ok ;;
+    124) echo timeout ;;
+    *)   echo failed ;;
+  esac
+}
+
+# domstate_of <virsh domstate exit status> <its output> -> the state
+# ("running", "shut off", ...), absent when libvirt has no such domain, or
+# unknown when libvirt could not say (not installed, or not answering)
+domstate_of() {
+  local line
+  if (( $1 == 0 )); then
+    while IFS= read -r line; do
+      [[ -z ${line// /} ]] || { printf '%s\n' "$line"; return 0; }
+    done <<< "$2"
+    echo unknown
+    return 0
+  fi
+  case $2 in
+    *'failed to get domain'*|*'Domain not found'*) echo absent ;;
+    *)                                             echo unknown ;;
+  esac
+}
+
+# console_clean <transcript text> -> its readable lines: each line as the
+# terminal last showed it (the text after its last carriage return), with
+# escape sequences and other control characters removed and the ends
+# trimmed; blank lines are dropped. `script` records the raw serial console:
+# CRLF line ends, progress redrawn in place, the loader's escape sequences.
+readonly CSI_RE=$'\e''\[[0-9;?]*[ -/]*[@-~]'
+console_clean() {
+  local line
+  while IFS= read -r line || [[ -n $line ]]; do
+    while [[ $line == *$'\r' ]]; do line=${line%$'\r'}; done
+    line=${line##*$'\r'}
+    while [[ $line =~ $CSI_RE ]]; do line=${line/"${BASH_REMATCH[0]}"/}; done
+    line=${line//[[:cntrl:]]/}
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    [[ -z $line ]] || printf '%s\n' "$line"
+  done <<< "$1"
+}
+
 # =============================================================================
 # Effects
 # =============================================================================
@@ -277,39 +442,44 @@ write_file() {
 # run_stage reads, and the stage's subshell exits
 stage_fail() { printf '%s\n' "$1" >&3; exit 1; }
 
-# run_stage <stage> — skip it or apply it, per its marker. A marker is
-# trusted only while the stage's live check passes.
+# run_stage <stage> <host.conf text> <engvm-lab.sh text> — skip it or apply
+# it, per its marker. A marker is trusted only while the stage's live check
+# passes. The guest stage is always applied: guest-verified, not a stage
+# marker, decides what it does (single-marker protocol, header).
 run_stage() {
   local input recorded
-  input=$(stage_input "$1") || return 1
+  if [[ $1 == guest ]]; then apply_stage guest '' "$2"; return; fi
+  input=$(stage_input "$1" "$2" "$3") || return 1
   recorded=$(marker_read "$1")
-  if [[ -n $recorded ]] && ! "check_$1"; then recorded=''; fi
+  if [[ -n $recorded ]] && ! "check_$1" "$2"; then recorded=''; fi
   case $(stage_decision "$recorded" "$input") in
     skip) progress "$1" skip ;;
-    run)  apply_stage "$1" "$input" ;;
+    run)  apply_stage "$1" "$input" "$2" ;;
   esac
 }
 
-# apply_stage <stage> <input> — runs stage_<stage> in a subshell. Its stdout
-# and stderr go to the journal; the last line it writes to fd 3 is its
-# summary (done) or reason (fail). The marker is written only on success.
+# apply_stage <stage> <input|""> <host.conf text> — runs stage_<stage>
+# (given host.conf) in a subshell. Its stdout and stderr go to the journal;
+# the last line it writes to fd 3 is its summary (done) or reason (fail). The
+# marker is written only on success, and only for a stage with an input.
 apply_stage() {
   local summary rc=0
   progress "$1" start
-  { summary=$("stage_$1" 3>&1 1>&4) || rc=$?; } 4>&1
+  { summary=$("stage_$1" "$3" 3>&1 1>&4) || rc=$?; } 4>&1
   summary=${summary##*$'\n'}
   if (( rc != 0 )); then
     progress "$1" fail "${summary:-exited $rc; see the journal}"
     return 1
   fi
-  marker_write "$1" "$2"
+  [[ -z $2 ]] || marker_write "$1" "$2"
   progress "$1" 'done' "$summary"
 }
 
 # provision_run — the stages, in order, framed by "provision start" and
-# "provision done"; the first failing stage ends the run
+# "provision done"; the first failing stage ends the run. Both pushed files
+# are checked before any stage runs.
 provision_run() {
-  local conf why stage
+  local conf lab why stage
   progress provision start
   conf=$(cat "$CONF_FILE" 2>/dev/null) || conf=''
   if [[ -z $conf ]]; then why='missing or empty'; else why=$(conf_problem "$conf"); fi
@@ -317,11 +487,14 @@ provision_run() {
     progress provision fail "bad host config $CONF_FILE: $why; run helios-lab up"
     return 1
   fi
+  lab=$(cat "$LAB_CONF_FILE" 2>/dev/null) || lab=''
+  if ! lab_sizing "$lab" >/dev/null; then
+    progress provision fail "bad guest sizing $LAB_CONF_FILE: not the VCPU, MEM and SIZE lines engvm-lab.sh ships; run helios-lab up"
+    return 1
+  fi
   for stage in $STAGES; do
-    run_stage "$stage" || { progress provision fail "$stage"; return 1; }
+    run_stage "$stage" "$conf" "$lab" || { progress provision fail "$stage"; return 1; }
   done
-  # --- Extension point (U3) ---
-  # engvm, seed and guest join STAGES; their inputs come from $conf (ENGVM_PIN).
   progress provision 'done'
 }
 
@@ -443,6 +616,138 @@ check_guard() {
   [[ $chain == *'iifname "virbr0" ip daddr 169.254.0.0/16 drop'* ]]
 }
 
+# as_lab <command...> — as ubuntu, with its HOME, groups and login shell
+# variables (runuser sets them), so git sees a checkout of its own owner
+as_lab() { runuser -u "$LAB_USER" -- "$@"; }
+
+# as_lab_virsh <command...> — as ubuntu, against the system libvirt, where
+# the default network lives (engvm's scripts call plain `virsh`)
+as_lab_virsh() { as_lab env "LIBVIRT_DEFAULT_URI=$LIBVIRT_URI" "$@"; }
+
+lab_conf_text() { cat "$LAB_CONF_FILE" 2>/dev/null || true; }
+
+# engvm: the checkout at exactly the pin (R6: unmodified, so the checkout is
+# forced), then the lab sizing as config/lab.sh, which engvm's .gitignore
+# keeps out of its tree. A directory that is not a checkout is never removed
+# here: it may hold the downloaded seed.
+stage_engvm() {
+  local pin head
+  pin=$(conf_get "$1" ENGVM_PIN) || stage_fail 'host.conf has no ENGVM_PIN'
+  if [[ ! -e $ENGVM_DIR ]]; then
+    as_lab git clone --quiet "$ENGVM_REPO" "$ENGVM_DIR" || stage_fail "cannot clone $ENGVM_REPO (see the journal)"
+  fi
+  [[ -d $ENGVM_DIR/.git ]] || stage_fail "$ENGVM_HOME is not a git checkout: remove it (helios-lab ssh host sudo rm -rf $ENGVM_HOME, which also drops the seed), then helios-lab up"
+  as_lab git -C "$ENGVM_DIR" cat-file -e "$pin^{commit}" 2>/dev/null \
+    || as_lab git -C "$ENGVM_DIR" fetch --quiet origin || stage_fail "cannot fetch $ENGVM_REPO (see the journal)"
+  as_lab git -C "$ENGVM_DIR" checkout --quiet --force --detach "$pin" \
+    || stage_fail "cannot check out $pin: is it a commit of $ENGVM_REPO?"
+  head=$(as_lab git -C "$ENGVM_DIR" rev-parse HEAD) || head=''
+  [[ $head == "$pin" ]] || stage_fail "the checkout's HEAD is ${head:-unreadable}, not the pin $pin"
+  install -o "$LAB_USER" -g "$LAB_USER" -m 0644 "$LAB_CONF_FILE" "$ENGVM_DIR/config/lab.sh" \
+    || stage_fail "cannot install $ENGVM_HOME/config/lab.sh"
+  echo "@${pin:0:7} · lab: $(lab_sizing "$(lab_conf_text)")" >&3
+}
+
+check_engvm() {
+  local pin head
+  pin=$(conf_get "$1" ENGVM_PIN) || return 1
+  head=$(as_lab git -C "$ENGVM_DIR" rev-parse HEAD 2>/dev/null) || return 1
+  [[ $head == "$pin" ]] && cmp -s "$LAB_CONF_FILE" "$ENGVM_DIR/config/lab.sh"
+}
+
+# seed: download.sh at the pin, which pins the seed's URL and both checksums
+# itself (plan: Open Questions), resumes a partial download and verifies what
+# it has. It retries forever on a failing curl, so the stage bounds it, and a
+# timeout is a named failure. It runs inside the provision unit, which an up
+# disconnecting (Ctrl-C, a sleeping Mac) never stops.
+stage_seed() {
+  local rc=0
+  [[ -x $ENGVM_DIR/download.sh ]] || stage_fail "$ENGVM_HOME/download.sh is missing: the engvm stage has not run"
+  timeout "$SEED_TIMEOUT_S" runuser -u "$LAB_USER" -- "$ENGVM_DIR/download.sh" || rc=$?
+  case $(seed_verdict "$rc") in
+    timeout) stage_fail "seed download timed out after $(( SEED_TIMEOUT_S / 60 )) min (download.sh retries forever; pkg.oxide.computer may be slow or unreachable): helios-lab up resumes it" ;;
+    failed)  stage_fail "download.sh failed (exit $rc): see the journal" ;;
+  esac
+  check_seed || stage_fail "download.sh finished, but $ENGVM_HOME/input/$SEED_IMAGE is missing"
+  echo "verified against engvm's pinned checksums" >&3
+}
+
+check_seed() { [[ -f $ENGVM_DIR/input/$SEED_IMAGE ]]; }
+
+# guest: the single-marker protocol (header). Returns once the domain runs;
+# the Mac's smoke check decides whether the guest is good.
+stage_guest() {
+  local verified=no domain create pin sizing note=''
+  [[ ! -f $GUEST_VERIFIED ]] || verified=yes
+  domain=$(domain_state)
+  create=$(unit_property ActiveState "$CREATE_UNIT")
+  pin=$(conf_get "$1" ENGVM_PIN) || stage_fail 'host.conf has no ENGVM_PIN'
+  sizing=$(lab_sizing "$(lab_conf_text)") || stage_fail "$LAB_CONF_FILE does not size a guest"
+  [[ $verified == no ]] || note=$(kept_note "$(cat "$GUEST_VERIFIED")" "$pin" "$sizing")
+  case $(guest_action "$verified" "$domain" "$create") in
+    keep)   guest_autostart
+            echo "verified guest running${note:+ · $note}" >&3 ;;
+    start)  guest_autostart
+            virsh_sys start "$GUEST_VM" || stage_fail "cannot start the verified guest (it was $domain)"
+            echo "verified guest started${note:+ · $note}" >&3 ;;
+    lost)   stage_fail "guest-verified exists, but libvirt has no domain $GUEST_VM: to build a new guest, helios-lab ssh host sudo rm /var/lib/helios-lab/guest-verified, then helios-lab up" ;;
+    odd)    stage_fail "the verified guest is $domain, neither running nor shut off: helios-lab console shows it, and helios-lab up tries again" ;;
+    wait)   guest_wait_running
+            echo 'first boot under way (its create unit is still running)' >&3 ;;
+    create) guest_create "$pin" "$sizing"
+            guest_wait_running
+            echo 'created · first boot under way' >&3 ;;
+  esac
+}
+
+# guest_create <pin> <sizing> — engvm's destroy.sh (idempotent: it clears an
+# earlier, unverified guest), then create.sh as ubuntu in a transient unit,
+# under `script` for the pty create.sh's `virsh start --console` needs and
+# for the console transcript. reset-failed and --collect: a failed run never
+# blocks the unit's name for the next one. The unit owns the console until
+# the Mac's guest-verified stops it; stopping it leaves the domain running.
+guest_create() {
+  install -d -o "$LAB_USER" -g "$LAB_USER" -m 0755 "$LOG_DIR" || stage_fail "cannot create $LOG_DIR"
+  as_lab_virsh "$ENGVM_DIR/destroy.sh" lab || stage_fail "engvm's destroy.sh lab failed (see the journal)"
+  write_file "$GUEST_BUILT" "$(guest_record "$1" "$2")" 0644 || stage_fail "cannot write $GUEST_BUILT"
+  systemctl reset-failed "$CREATE_UNIT" >/dev/null 2>&1 || true   # nothing to reset is fine
+  systemd-run --quiet --uid="$LAB_USER" --collect --unit="${CREATE_UNIT%.service}" \
+    -E "LIBVIRT_DEFAULT_URI=$LIBVIRT_URI" -p "WorkingDirectory=$ENGVM_DIR" \
+    /usr/bin/script -qfec './create.sh lab' "$TRANSCRIPT" || stage_fail "systemd-run could not start $CREATE_UNIT"
+}
+
+# guest_wait_running — until the domain runs; fails when the create unit
+# ends first (create.sh failed), or at CREATE_WAIT_S
+guest_wait_running() {
+  local n
+  for (( n = 0; n * 5 < CREATE_WAIT_S; n++ )); do
+    [[ $(domain_state) != running ]] || return 0
+    case $(unit_property ActiveState "$CREATE_UNIT") in
+      active|activating) ;;
+      *) stage_fail "create.sh ended before the guest ran: $(transcript_lines 1) (transcript: /var/log/helios-lab/console.log)" ;;
+    esac
+    sleep 5
+  done
+  stage_fail "the guest was not running $(( CREATE_WAIT_S / 60 )) min after create.sh started (transcript: /var/log/helios-lab/console.log)"
+}
+
+guest_autostart() { virsh_sys autostart "$GUEST_VM" >/dev/null || stage_fail "cannot mark $GUEST_VM to autostart"; }
+
+# domain_state -> the guest domain's state (domstate_of)
+domain_state() {
+  local out rc=0
+  out=$(virsh_sys domstate "$GUEST_VM" 2>&1) || rc=$?
+  domstate_of "$rc" "$out"
+}
+
+# transcript_lines <n> -> the console transcript's last n readable lines
+transcript_lines() {
+  local raw
+  [[ -f $TRANSCRIPT ]] || return 0
+  raw=$(tail -n 400 "$TRANSCRIPT" 2>/dev/null) || return 0
+  console_clean "$raw" | tail -n "$1"
+}
+
 # --- install, progress, journal ----------------------------------------------
 # cmd_install <dir> — the push's last step, as root: each pushed file to its
 # place (install_dest), atomically, then a systemd reload. The directory goes
@@ -481,10 +786,96 @@ cmd_progress() {
   printf 'unit %s %s\n' "$(unit_property ActiveState)" "$(unit_property Result)"
 }
 
+# unit_property <property> [unit] -> its value (the provision unit by
+# default), or unknown
 unit_property() {
   local value
-  value=$(systemctl show -p "$1" --value "$SERVICE" 2>/dev/null) || value=''
+  value=$(systemctl show -p "$1" --value "${2:-$SERVICE}" 2>/dev/null) || value=''
   echo "${value:-unknown}"
+}
+
+# cmd_status — read-only (the Mac's status relies on it): the progress, then
+# one "<key> <value>" line per guest fact, parsed by lib/remote.sh:
+#   verified no | verified <pin> <sizing>   guest-verified's record
+#   pushed <pin> <sizing> | pushed unknown  what host.conf and engvm-lab.sh say now
+#   domain <virsh domstate> | absent | unknown
+#   create <ActiveState of the create unit>
+#   lease <IPv4> | lease none               libnss-libvirt's answer for helios
+#   sshd open | sshd closed                 the guest's tcp/22, from the host
+#   console <line>                          an unverified guest's latest
+#                                           transcript lines, oldest first
+# The host holds no key for the guest, so it can only probe it: the Mac's
+# smoke check is what verifies it.
+cmd_status() {
+  local domain lease verified=no line
+  cmd_progress
+  [[ ! -f $GUEST_VERIFIED ]] || verified=$(record_line "$(cat "$GUEST_VERIFIED")")
+  echo "verified $verified"
+  echo "pushed $(pushed_line)"
+  domain=$(domain_state)
+  echo "domain $domain"
+  echo "create $(unit_property ActiveState "$CREATE_UNIT")"
+  lease=$(guest_lease)
+  echo "lease ${lease:-none}"
+  if [[ -n $lease && $domain == running ]] && port22_open "$lease"; then echo 'sshd open'; else echo 'sshd closed'; fi
+  [[ $verified == no ]] || return 0
+  while IFS= read -r line; do
+    [[ -z $line ]] || printf 'console %s\n' "$line"
+  done <<< "$(transcript_lines "$TRANSCRIPT_LINES")"
+}
+
+# record_line <record text> -> "<pin> <sizing>"
+record_line() { echo "$(record_field "$1" ENGVM_PIN) $(record_field "$1" SIZING)"; }
+
+# pushed_line -> "<pin> <sizing>" as the last push left them, or unknown
+pushed_line() {
+  local pin sizing
+  if pin=$(conf_get "$(cat "$CONF_FILE" 2>/dev/null || true)" ENGVM_PIN) && sizing=$(lab_sizing "$(lab_conf_text)"); then
+    echo "$pin $sizing"
+  else
+    echo unknown
+  fi
+}
+
+# guest_lease -> the guest's IPv4 from its DHCP lease (libnss-libvirt, which
+# also serves the Mac's ProxyJump; the spike resolved it with getent), or
+# nothing. getent prints one line per address: the first IPv4 counts.
+guest_lease() {
+  local ip rest
+  while read -r ip rest; do
+    [[ ! $ip =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { echo "$ip"; return 0; }
+  done <<< "$(getent hosts "$GUEST_VM" 2>/dev/null || true)"
+}
+
+# port22_open <IPv4> — bash's own /dev/tcp, bounded, so no extra package
+port22_open() { timeout 2 bash -c "exec 3<>/dev/tcp/$1/22" 2>/dev/null; }
+
+# cmd_guest_verified — the Mac's smoke check passed: the record of what the
+# guest was created from becomes guest-verified (written first: from here
+# on, provisioning never recreates this guest), the create unit stops, which
+# frees the console and leaves the domain running (U7), and the guest
+# autostarts with the host from now on.
+cmd_guest_verified() {
+  require_root guest-verified
+  [[ -f $GUEST_BUILT ]] || die "no guest create is recorded ($GUEST_BUILT): nothing to mark verified"
+  write_file "$GUEST_VERIFIED" "$(cat "$GUEST_BUILT")" 0644 || die "cannot write $GUEST_VERIFIED"
+  create_unit_stop
+  virsh_sys autostart "$GUEST_VM" >/dev/null || die "cannot mark $GUEST_VM to autostart"
+}
+
+# cmd_guest_abandon — an unverified first boot never passed the smoke check:
+# its create unit stops, so the next provision run destroys and recreates the
+# guest. Invariant: a verified guest is never abandoned.
+cmd_guest_abandon() {
+  require_root guest-abandon
+  [[ ! -f $GUEST_VERIFIED ]] || die 'the guest is verified: a verified guest is never abandoned or recreated'
+  create_unit_stop
+}
+
+create_unit_stop() {
+  case $(unit_property ActiveState "$CREATE_UNIT") in
+    active|activating|reloading) systemctl stop "$CREATE_UNIT" || die "cannot stop $CREATE_UNIT" ;;
+  esac
 }
 
 # cmd_journal [n|all] — the unit's journal since the current run began (the
@@ -517,7 +908,10 @@ main() {
     progress-reset) cmd_progress_reset ;;
     progress)       cmd_progress ;;
     journal)        cmd_journal "${2:-20}" ;;
-    *)              die "usage: $HOST_SELF install <dir> | provision | progress-reset | progress | journal [<lines>|all]" ;;
+    status)         cmd_status ;;
+    guest-verified) cmd_guest_verified ;;
+    guest-abandon)  cmd_guest_abandon ;;
+    *)              die "usage: $HOST_SELF install <dir> | provision | progress-reset | progress | journal [<lines>|all] | status | guest-verified | guest-abandon" ;;
   esac
 }
 

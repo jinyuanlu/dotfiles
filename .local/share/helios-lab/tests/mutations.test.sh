@@ -100,9 +100,10 @@ sg_writes_ok() {
   reply ec2-authorize-security-group-ingress "$DERIVED/authorize-security-group-ingress.return.txt"
 }
 
-# What up ends with until U3 boots the guest (the U2 bootstrap is
-# remote.test.sh's subject; here world_host_ok just lets it succeed).
-readonly U2_LAST_LINE='next: helios-lab stop pauses billing · the Helios guest (U3) is not built yet'
+# What up ends with once the guest passed its smoke check (the bootstrap and
+# the guest are remote.test.sh's and guest.test.sh's subjects; here
+# world_host_ok just lets them succeed).
+readonly UP_LAST_LINE='next: helios-lab ssh'
 
 # world_absent — no lab instance and no group: a full, successful create
 world_absent() {
@@ -227,7 +228,7 @@ test_up_absent_creates_a_tagged_group_then_launches_the_lab_instance() {
   assert_contains "$(sed -n 7p <<< "$OUT")" "instance $LAB_ID running · "
   assert_line 8 "host running · $LAB_ID · $FIXTURE_IP · ≈\$0.27/hr · stops itself by about 21:51 (dead-man timer)"
   assert_line 9 "host key · waiting for $LAB_ID's fingerprints on its console"   # then the U2 bootstrap
-  assert_eq "$U2_LAST_LINE" "$(tail -1 <<< "$OUT")" 'last line'
+  assert_eq "$UP_LAST_LINE" "$(tail -1 <<< "$OUT")" 'last line'
   assert_no_lock
 }
 
@@ -427,7 +428,7 @@ test_up_running_converged_makes_no_write_and_no_group_line() {
   assert_no_mutation
   assert_contains "$(calls)" "aws ec2 describe-security-group-rules --filters Name=group-id,Values=$LAB_GROUP --query SecurityGroupRules[].[SecurityGroupRuleId,IsEgress,IpProtocol,FromPort,ToPort,CidrIpv4]"
   assert_line 1 "host running · $LAB_ID · $FIXTURE_IP · ≈\$0.27/hr · stops itself by about 21:51 (dead-man timer)"
-  assert_eq "$U2_LAST_LINE" "$(tail -1 <<< "$OUT")" 'last line'
+  assert_eq "$UP_LAST_LINE" "$(tail -1 <<< "$OUT")" 'last line'
   assert_eq '' "$ERR"
 }
 

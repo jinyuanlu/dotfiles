@@ -39,7 +39,15 @@ readonly OTHER_FP=SHA256:kz+Tw/36PkRNhaOvv5otG5S4Peg4eicnqhu/ViZnv2E   # its ECD
 readonly PIN=8ef18ef53d3baa03eebe5f2238a3a4ceef1b6f4a
 readonly HELPER_PATH=/usr/local/libexec/helios-lab/helios-lab-host
 readonly PUSH_CMD="sudo bash -c 'stage=\$(mktemp -d /tmp/helios-lab-push.XXXXXX) && cd \"\$stage\" && bash -s && exec bash ./helios-lab-host install \"\$stage\"'"
-readonly NEXT_LINE='next: helios-lab stop pauses billing · the Helios guest (U3) is not built yet'
+readonly RFD26_LINE='seed · fetching and verifying the 2.4 GB Helios seed (about 5 min the first time) · meanwhile, read RFD 26: https://rfd.shared.oxide.computer/rfd/0026'
+# The provision lines of a clean first run (progress_reply 'done')
+readonly STAGE_LINES="packages · done · 41s · 8 packages installed
+libvirt · done · 3s · kvm ok, default network active
+guard · done · 0s · virbr0 to 169.254.0.0/16 dropped
+engvm · done · 9s · @8ef18ef · lab: 3 vCPU, 8 GiB, 60G
+$RFD26_LINE
+seed · done · 5m11s · verified against engvm's pinned checksums
+guest · done · 1m05s · created · first boot under way"
 
 # --- Scenario builders -------------------------------------------------------
 # world_running — one running lab instance with the test key, a converged
@@ -96,21 +104,29 @@ host_env() {
   require_root() { :; }
 }
 
-# host_conf_ok — the host config a push leaves, rendered by the Mac's own code
+# host_conf_ok — the config a push leaves: host.conf rendered by the Mac's
+# own code, and the shipped guest sizing
 host_conf_ok() {
   mkdir -p "$SANDBOX/root/etc/helios-lab"
   ( load_cli; render_host_config 60 "$PIN" ) > "$SANDBOX/root/etc/helios-lab/host.conf"
+  cp "$HELIOS_LAB_HOME/host/engvm-lab.sh" "$SANDBOX/root/etc/helios-lab/engvm-lab.sh"
 }
 
-# fake_stages — after host_env: stages and live checks that record, not apply
+# fake_stages — after host_env: stages and live checks that record, not
+# apply; their summaries are the ones progress_reply (tests/lib.sh) uses
 # shellcheck disable=SC2329  # called by the helper's run_stage, by name
 fake_stages() {
   stage_packages() { echo packages >> "$SANDBOX/ran"; echo 'apt says hello'; echo '8 packages installed' >&3; }
   stage_libvirt() { echo libvirt >> "$SANDBOX/ran"; echo 'kvm ok, default network active' >&3; }
   stage_guard() { echo guard >> "$SANDBOX/ran"; echo 'virbr0 to 169.254.0.0/16 dropped' >&3; }
+  stage_engvm() { echo engvm >> "$SANDBOX/ran"; echo "@${PIN:0:7} · lab: $LAB_SIZING" >&3; }
+  stage_seed() { echo seed >> "$SANDBOX/ran"; echo "verified against engvm's pinned checksums" >&3; }
+  stage_guest() { echo guest >> "$SANDBOX/ran"; echo 'created · first boot under way' >&3; }
   check_packages() { :; }
   check_libvirt() { :; }
   check_guard() { :; }
+  check_engvm() { :; }
+  check_seed() { :; }
 }
 
 ran() { tr '\n' ' ' < "$SANDBOX/ran" 2>/dev/null | sed 's/ $//'; }
@@ -339,16 +355,23 @@ test_up_verifies_pushes_starts_and_follows_on_a_running_host() {
 host key · waiting for $LAB_ID's fingerprints on its console
 host key · ED25519 $HOST_FP matches the console · pinned · Ns
 push · host code and config installed · idle 60 min · engvm @8ef18ef
-packages · done · 41s · 8 packages installed
-libvirt · done · 3s · kvm ok, default network active
-guard · done · 0s · virbr0 to 169.254.0.0/16 dropped
+$STAGE_LINES
 host ready · KVM, libvirt and the metadata guard are in place
-$NEXT_LINE" "$(steady <<< "$OUT")"
+first boot · waiting for the guest's smoke check (up to 0m)
+guest · verified · its console is free · it starts with the host from now on
+guest ready in Ns · illumos · dtrace ok
+  in the guest, try: pfexec dtrace -n 'syscall:::entry { @[execname] = count(); }'  (Ctrl-C prints system calls by process)
+  the host stops itself by about 21:51 (dead-man timer, 2h after boot) · helios-lab stop pauses billing now
+next: helios-lab ssh" "$(steady <<< "$OUT" | sed -E 's/^(guest ready in )[0-9]+s/\1Ns/')"
   assert_eq '' "$ERR"
   local cfg=$HELIOS_LAB_STATE_DIR/ssh_config
   assert_eq "ssh -F $cfg host $PUSH_CMD
 ssh -F $cfg host sudo systemctl start helios-lab-provision.service
-ssh -F $cfg host $HELPER_PATH progress" "$(ssh_calls)"
+ssh -F $cfg host $HELPER_PATH progress
+ssh -F $cfg host sudo $HELPER_PATH status
+ssh -F $cfg guest uname -o
+ssh -F $cfg guest pfexec dtrace -n 'BEGIN { exit(0); }'
+ssh -F $cfg host sudo $HELPER_PATH guest-verified" "$(ssh_calls)"
   assert_not_contains "$(calls)" 'StrictHostKeyChecking'   # no call loosens the fragment
   assert_not_contains "$(calls)" 'scp '
 }
@@ -480,7 +503,8 @@ test_a_failed_run_that_predates_the_push_is_rerun_not_reported() {
   assert_rc 0
   assert_contains "$OUT" 'guard · failed'
   assert_contains "$OUT" 'predates this push'
-  assert_eq 'host ready · KVM, libvirt and the metadata guard are in place' "$(tail -2 <<< "$OUT" | head -1)"
+  assert_contains "$OUT" $'guest · done · 1m05s · created · first boot under way\nhost ready · KVM, libvirt and the metadata guard are in place'
+  assert_eq 'next: helios-lab ssh' "$(tail -1 <<< "$OUT")"
   assert_eq '' "$(ssh_calls | grep journal || true)" 'no failure report'
 }
 
@@ -530,9 +554,12 @@ test_a_second_up_on_a_provisioned_host_says_every_stage_is_unchanged() {
   world_running
   pinned
   progress_reply unchanged | ssh_reply ssh-host-progress
+  guest_status_reply verified unchanged | ssh_reply ssh-host-status
   run_cli up
   assert_rc 0
-  assert_contains "$OUT" $'packages · unchanged\nlibvirt · unchanged\nguard · unchanged\nhost ready'
+  # Every stage but guest, which is never skipped: it found the verified guest running.
+  assert_contains "$OUT" $'packages · unchanged\nlibvirt · unchanged\nguard · unchanged\nengvm · unchanged\nseed · unchanged\nguest · done · 0s · verified guest running\nhost ready'
+  assert_not_contains "$OUT" 'RFD 26'   # the seed stage did not start
 }
 
 test_a_failed_stage_names_it_and_shows_the_journal_tail() {
@@ -589,7 +616,7 @@ test_up_v_prints_the_whole_journal_and_other_arguments_are_usage_errors() {
   printf '%s\n' '1792839100 provision start' 'Reading package lists...' | ssh_reply ssh-host-journal
   run_cli up -v
   assert_rc 0
-  assert_contains "$OUT" $'guard · done · 0s · virbr0 to 169.254.0.0/16 dropped\nhost journal (helios-lab-provision.service, this run):\n  1792839100 provision start\n  Reading package lists...\nhost ready'
+  assert_contains "$OUT" $'guest · done · 1m05s · created · first boot under way\nhost journal (helios-lab-provision.service, this run):\n  1792839100 provision start\n  Reading package lists...\nhost ready'
   assert_contains "$(ssh_calls)" "host sudo $HELPER_PATH journal all"
   local args
   for args in '-v -v' --verbose -x now; do
@@ -614,10 +641,9 @@ test_the_fragment_is_written_for_this_ip_before_the_first_ssh() {
 # --- Progress protocol (pure, Mac side) --------------------------------------
 test_progress_lines_show_each_finished_stage_with_its_elapsed_time() {
   load_cli
-  assert_eq 'packages · done · 41s · 8 packages installed
-libvirt · done · 3s · kvm ok, default network active
-guard · done · 0s · virbr0 to 169.254.0.0/16 dropped' "$(progress_lines "$(progress_reply 'done')")"
-  assert_eq $'packages · unchanged\nlibvirt · unchanged\nguard · unchanged' "$(progress_lines "$(progress_reply unchanged)")"
+  assert_eq "$STAGE_LINES" "$(progress_lines "$(progress_reply 'done')")"
+  assert_eq $'packages · unchanged\nlibvirt · unchanged\nguard · unchanged\nengvm · unchanged\nseed · unchanged\nguest · done · 0s · verified guest running' \
+    "$(progress_lines "$(progress_reply unchanged)")"
   assert_eq 'guard · failed · 2s · loading /etc/helios-lab/guard.nft failed (nft -f): see the journal' \
     "$(progress_lines "$(progress_reply guard-failed)" | tail -1)"
   assert_eq '' "$(progress_lines "$(progress_reply packages-running)")" 'nothing has finished yet'
@@ -957,25 +983,37 @@ test_provision_runs_every_stage_once_then_skips_them_all() {
   fake_stages
   host_conf_ok
   provision_run > "$SANDBOX/journal"
-  assert_eq 'provision start
+  assert_eq "provision start
 packages start
 packages done 8 packages installed
 libvirt start
 libvirt done kvm ok, default network active
 guard start
 guard done virbr0 to 169.254.0.0/16 dropped
-provision done' "$(events)"
-  assert_eq 'packages libvirt guard' "$(ran)"
-  local s
-  for s in packages libvirt guard; do assert_eq "$(stage_input "$s")" "$(marker "$s")" "$s marker"; done
+engvm start
+engvm done @8ef18ef · lab: $LAB_SIZING
+seed start
+seed done verified against engvm's pinned checksums
+guest start
+guest done created · first boot under way
+provision done" "$(events)"
+  assert_eq 'packages libvirt guard engvm seed guest' "$(ran)"
+  local s conf lab
+  conf=$(<"$SANDBOX/root/etc/helios-lab/host.conf")
+  lab=$(<"$SANDBOX/root/etc/helios-lab/engvm-lab.sh")
+  for s in packages libvirt guard engvm seed; do
+    assert_eq "$(stage_input "$s" "$conf" "$lab")" "$(marker "$s")" "$s marker"
+  done
+  [[ ! -e $SANDBOX/root/var/lib/helios-lab/stage.guest ]] || fail 'the guest stage wrote a stage marker'
   assert_contains "$(<"$SANDBOX/journal")" 'apt says hello'   # a stage's output reaches the journal
   assert_contains "$(<"$SANDBOX/journal")" 'packages done 8 packages installed'
-  # Re-running provision on a completed host skips every stage.
+  # Re-running provision on a completed host skips every stage but guest,
+  # which guest-verified, not a stage marker, governs.
   : > "$SANDBOX/ran"
   cmd_progress_reset
   provision_run > /dev/null
-  assert_eq $'provision start\npackages skip\nlibvirt skip\nguard skip\nprovision done' "$(events)"
-  assert_eq '' "$(ran)"
+  assert_eq $'provision start\npackages skip\nlibvirt skip\nguard skip\nengvm skip\nseed skip\nguest start\nguest done created · first boot under way\nprovision done' "$(events)"
+  assert_eq 'guest' "$(ran)"
 }
 
 test_a_changed_input_or_a_failed_live_check_reruns_only_that_stage() {
@@ -989,7 +1027,7 @@ test_a_changed_input_or_a_failed_live_check_reruns_only_that_stage() {
   : > "$SANDBOX/ran"
   cmd_progress_reset
   provision_run > /dev/null
-  assert_eq 'libvirt guard' "$(ran)"
+  assert_eq 'libvirt guard guest' "$(ran)"
   assert_eq 'packages skip' "$(events | sed -n 2p)"
   assert_eq "$(stage_input libvirt)" "$(marker libvirt)" 'the marker records the new input'
 }
@@ -1045,9 +1083,7 @@ test_the_helpers_progress_is_exactly_what_the_mac_parses() {
   load_cli
   assert_eq 'done' "$(progress_verdict "$snapshot")"
   # Elapsed is whatever the clock said (0s or 1s): normalized.
-  assert_eq 'packages · done · Ns · 8 packages installed
-libvirt · done · Ns · kvm ok, default network active
-guard · done · Ns · virbr0 to 169.254.0.0/16 dropped' "$(progress_lines "$snapshot" | sed -E 's/ · [0-9]+s · / · Ns · /')"
+  assert_eq "$(sed -E 's/ · [0-9m]+s · / · Ns · /' <<< "$STAGE_LINES")" "$(progress_lines "$snapshot" | sed -E 's/ · [0-9]+s · / · Ns · /')"
   assert_eq "failed${US}guard${US}loading /etc/helios-lab/guard.nft failed (nft -f): see the journal" "$(progress_verdict "$failed")"
   # The hand-written replies every Mac test uses have the same shape.
   assert_eq "$(drop_epochs <<< "$snapshot")" "$(progress_reply 'done' | drop_epochs)"

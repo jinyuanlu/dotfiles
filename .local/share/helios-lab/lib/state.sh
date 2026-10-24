@@ -3,7 +3,8 @@
 # helios-lab state.sh — pure decisions: EC2 state -> up/stop action, stop
 # cause, status lines, the cost table, input validation (U1); preflight
 # verdicts, guest sizing, security-group convergence plans, the lab-key
-# verdict and the lifecycle messages (U6).
+# verdict and the lifecycle messages (U6); why ssh and console refuse, the
+# host-stopped-itself line and the ready screen (U3).
 #
 # Pure means the output depends only on the arguments (plus TZ, for the one
 # local clock time). Nothing here calls AWS, reads files or asks for `now`:
@@ -258,16 +259,22 @@ status_details() {
 
 # --- Anomalies ---------------------------------------------------------------
 # Anomalies print above the headline, each as one "! " line.
-# anomaly <kind> [arg] — kinds: duplicates, orphan-group, stuck-stopping,
-# ip-not-allowed, ip-unknown
+# anomaly <kind> [args] — kinds: duplicates, orphan-group, stuck-stopping,
+# ip-not-allowed, ip-unknown (U1); from status's host probe (U3):
+# guest-mismatch <text>, provision-failed <stage> <reason>,
+# host-silent <seconds> <ssh said>, probe-failed <what>
 anomaly() {
   case $1 in
-    duplicates)     printf '! %s\n' "$2" ;;
-    orphan-group)   printf '! security group %s exists with no instance: up reuses it, destroy --yes deletes it\n' "$2" ;;
-    stuck-stopping) printf '! stopping for %s (usually under 2 min): check the instance in the EC2 console\n' "$2" ;;
-    ip-not-allowed) printf "! this Mac's IP (%s) is not allowed in the security group: helios-lab up updates the rule\n" "$2" ;;
-    ip-unknown)     printf "! could not check this Mac's IP: checkip.amazonaws.com gave no IPv4 address\n" ;;
-    *)              return 1 ;;
+    duplicates)       printf '! %s\n' "$2" ;;
+    orphan-group)     printf '! security group %s exists with no instance: up reuses it, destroy --yes deletes it\n' "$2" ;;
+    stuck-stopping)   printf '! stopping for %s (usually under 2 min): check the instance in the EC2 console\n' "$2" ;;
+    ip-not-allowed)   printf "! this Mac's IP (%s) is not allowed in the security group: helios-lab up updates the rule\n" "$2" ;;
+    ip-unknown)       printf "! could not check this Mac's IP: checkip.amazonaws.com gave no IPv4 address\n" ;;
+    guest-mismatch)   printf '! %s\n' "$2" ;;
+    provision-failed) printf '! provision failed at stage %s: %s; helios-lab up runs it again\n' "$2" "$3" ;;
+    host-silent)      printf '! the host did not answer ssh within %ss (%s): it may be stopping itself; helios-lab up reconnects\n' "$2" "$3" ;;
+    probe-failed)     printf "! the host's status probe failed (%s): helios-lab up pushes the current helper\n" "$2" ;;
+    *)                return 1 ;;
   esac
 }
 
@@ -561,6 +568,49 @@ running_line() {
 
 # stopped_line -> what stop ends with: compute billing ended, storage didn't
 stopped_line() { join_dot stopped 'disk intact' "$(storage_month) storage continues"; }
+
+# not_running_message <state> <instance-id> <StateReason.Code> <StateTransitionReason>
+# -> why ssh and console refuse a host that isn't running, ending in the
+# command that fixes it. They never start it themselves: it would bill
+# (plan: "Explicit over implicit"). The stop cause is U1's: an idle stop
+# (which also covers the dead-man timer) has no time, a manual one shows it.
+not_running_message() {
+  case $1:$3 in
+    stopped:Client.InstanceInitiatedShutdown) echo "$2 stopped itself (idle) — run helios-lab up" ;;
+    stopped:*)       echo "$2 is $(stop_cause "$3" "$4") — run helios-lab up" ;;
+    stopping:*)      echo "$2 is stopping — run helios-lab up (it waits, then starts it again)" ;;
+    pending:*)       echo "$2 is starting — run helios-lab up (it waits until it runs)" ;;
+    shutting-down:*) echo "$2 is being terminated — run helios-lab up for a new lab" ;;
+    absent:*)        echo 'no lab instance — run helios-lab up' ;;
+    *)               echo "$2 is $1 — run helios-lab up" ;;
+  esac
+}
+
+# stopped_while_connecting <instance-id> <StateReason.Code> <StateTransitionReason>
+# -> what up says when ssh to the host failed because the host stopped: an
+# idle poweroff (or the dead-man timer) can land between "saw running" and
+# "connected" (plan: Host lifecycle)
+stopped_while_connecting() {
+  case $2 in
+    Client.InstanceInitiatedShutdown) echo "host $1 stopped itself (idle) while up was connecting" ;;
+    *)                                echo "host $1 was $(stop_cause "$2" "$3") while up was connecting" ;;
+  esac
+}
+
+# ready_screen <elapsed-s|""> <dead-man epoch> -> what a successful up ends
+# with (R14): the smoke check's result, one DTrace one-liner to try in the
+# guest, the stop that is armed, then one runnable next command.
+# --- Extension point (U4) ---
+# Until U4's push enables the idle timer, the dead-man timer is the armed
+# stop, so that is what this names; U4 replaces it with the idle countdown
+# and the keep note.
+readonly DTRACE_TRY="pfexec dtrace -n 'syscall:::entry { @[execname] = count(); }'"
+ready_screen() {
+  join_dot "guest ready${1:+ in $(fmt_elapsed "$1")}" illumos 'dtrace ok'
+  echo "  in the guest, try: $DTRACE_TRY  (Ctrl-C prints system calls by process)"
+  echo "  the host stops itself by about $(local_hhmm "$2") (dead-man timer, 2h after boot) · helios-lab stop pauses billing now"
+  echo 'next: helios-lab ssh'
+}
 
 # billing_notice <instance-id|""> <type> <launch-epoch> -> what a failed or
 # interrupted up prints once a host may be billing. An empty id means a launch

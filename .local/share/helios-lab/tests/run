@@ -59,9 +59,11 @@ echo "$passed passed, $failed failed"
 # --- Lint --------------------------------------------------------------------
 # The linter backs the suite. Not installed: say so loudly, don't fail.
 # Every script of the command: the entry, its libraries, the host helper
-# (bash on the host, sourced under 3.2 here), the runner, helpers and stubs.
+# (bash on the host, sourced under 3.2 here) and the guest sizing engvm's
+# create.sh sources, the runner, helpers and stubs.
 lint=0 scripts=()
 for file in "$HELIOS_LAB_BIN" "$HELIOS_LAB_HOME"/lib/*.sh "$HELIOS_LAB_HOME"/host/helios-lab-host \
+  "$HELIOS_LAB_HOME"/host/engvm-lab.sh \
   "$TESTS_DIR"/run "$TESTS_DIR"/derive-text "$TESTS_DIR"/*.sh "$TESTS_DIR"/stubs/*; do
   [[ ! -f $file ]] || scripts+=("$file")
 done
