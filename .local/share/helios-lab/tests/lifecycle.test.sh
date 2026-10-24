@@ -93,6 +93,29 @@ test_single_instance_commands_refuse_duplicates_with_exit_4() {
   assert_contains "$ERR" "2 lab instances exist; at most one should: $LAB_ID (running), $OTHER_ID (stopped)"
 }
 
+# discover_single always runs captured (no errexit under bash 3.2), so a
+# failed discovery must pass its typed code on, never read as "absent":
+# stop would say "nothing to stop" and exit 0 while the host bills.
+test_a_failed_discovery_ends_every_single_instance_command_with_its_typed_code() {
+  local spec rc text said args
+  for spec in "3|Error when retrieving token from sso: Token has expired and refresh failed|the SSO session for profile 'helios-lab' has expired (ec2 describe-instances)" \
+              "8|Could not connect to the endpoint URL: \"https://ec2.ap-northeast-1.amazonaws.com/\"|cannot reach AWS (ec2 describe-instances)"; do
+    IFS='|' read -r rc text said <<< "$spec"
+    reply_error ec2-describe-instances 254 $'\n'"$text"
+    for args in stop ssh 'ssh host uptime' console 'keep 3h'; do
+      rm -rf "$STUB_AWS_DIR/.calls"; : > "$STUB_LOG"
+      # shellcheck disable=SC2086  # the words are the command and its arguments
+      run_cli $args
+      assert_rc "$rc"
+      assert_eq 1 "$(grep -cF -- "$said" <<< "$ERR")" "$args: the failure, reported once"
+      assert_not_contains "$ERR" 'no lab instance'
+      assert_eq '' "$OUT" "$args: nothing on stdout (stop must not say 'nothing to stop')"
+      assert_eq describe-instances "$(aws_ops)" "$args: no call after the failed discovery"
+      assert_eq '' "$(grep -E '^(ssh|ssh-keyscan|curl) ' "$STUB_LOG" || true)" "$args: no ssh, no checkip"
+    done
+  done
+}
+
 # --- status: absent and conflicts --------------------------------------------
 test_status_absent_says_absent_and_exits_0() {
   no_instances; no_groups

@@ -266,9 +266,12 @@ key_lost() {
 # conflict (exit 4) listing every ID, never auto-resolved. Every command except
 # status and destroy goes through here. Callers: declare the local first, then
 # assign (`local row; row=$(discover_single)`), or `local` masks the exit code.
+# It always runs captured, where bash 3.2 has no errexit, so a failed
+# discovery (an expired SSO session, the network) is passed on explicitly:
+# never read as "absent", which would let up launch a second instance.
 discover_single() {
   local rows
-  rows=$(aws_discover_instances)
+  rows=$(aws_discover_instances) || return
   (( $(count_rows "$rows") <= 1 )) \
     || die "$EX_CONFLICT" "$(duplicates_message "$rows")" "helios-lab status lists them"
   printf '%s' "$rows"
@@ -689,11 +692,13 @@ connect_running() {
 # deadline on its own clock, enforces the cap again, and keeps it on disk,
 # so it survives a stop and start: it is a wall-clock deadline, inert once
 # passed. After it, the idle window counts again from its start. No lock:
-# keep changes nothing up, stop or destroy guard.
+# keep changes nothing up, stop or destroy guard. Like ssh's, its connecting
+# notices (an ingress change, a first host-key pin) go to stderr, so stdout
+# carries only the keep's result line.
 cmd_keep() {
   local arg reply line
   arg=$(keep_arg "$@")
-  connect_running "$SELF keep never starts the host: it bills while it runs"
+  connect_running "$SELF keep never starts the host: it bills while it runs" >&2
   reply=$(keep_set "$arg")
   line=$(keep_line "$reply" "$IDLE_MINUTES") \
     || die "$EX_FAIL" "the host answered '$(first_line "$reply")' to keep, neither a deadline nor off" \

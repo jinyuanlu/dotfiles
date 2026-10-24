@@ -32,6 +32,7 @@ readonly HOST_DIR=$HELIOS_LAB_HOME/host
 
 readonly LAB_ID=i-0123456789abcdef0
 readonly HOST_IP=203.0.113.10          # the fixtures' (sanitized) public IP
+readonly OTHER_IP=198.51.100.7         # another Mac (documentation range)
 readonly HELPER_PATH=/usr/local/libexec/helios-lab/helios-lab-host
 readonly NOW=1792839100                # the host clock in host-side tests
 readonly DEADMAN_UTC=12:51             # RUNNING's launch (10:50:39Z) + 2h, to the minute
@@ -638,6 +639,29 @@ test_keep_3h_holds_off_the_idle_stop_on_a_running_host() {
   assert_contains "$(calls)" 'aws ec2 describe-security-group-rules'   # the ingress refresh, first
   assert_contains "$(calls)" "Tags[?Key=='KeyFingerprint']"            # and the lab key
   assert_eq '' "$ERR"
+}
+
+# keep's stdout is its result alone, as ssh's is the command's: what it
+# prints while connecting (the ingress rule moving to this Mac's new IP, a
+# first host-key pin) goes to stderr, so a script can read the deadline.
+test_keep_prints_only_its_result_on_stdout_even_when_it_moves_the_rule_and_pins_the_key() {
+  lab_key   # world_running without its pin: this keep verifies the host key
+  tagged < "$RUNNING" | reply ec2-describe-instances
+  reply ec2-describe-security-group-rules "$RULES_CONVERGED"
+  reply ec2-revoke-security-group-ingress "$DERIVED/revoke-security-group-egress.return.txt"   # same shape
+  reply ec2-authorize-security-group-ingress "$DERIVED/authorize-security-group-ingress.return.txt"
+  caller_ip_is "$OTHER_IP"
+  world_host_ok
+  export TZ=UTC
+  local deadline=$(( $(date +%s) + 10800 ))
+  echo "$deadline" | ssh_reply ssh-host-keep
+  run_cli keep 3h
+  assert_rc 0
+  assert_eq "keep · auto-stop inhibited until $(hhmm_utc "$deadline"), then it stops after 60 min idle · helios-lab keep off clears it" "$OUT"
+  assert_contains "$ERR" "ssh ingress: $OTHER_IP/32 only (removed tcp/22 $HOST_IP/32)"
+  assert_contains "$ERR" "host key · waiting for $LAB_ID's fingerprints on its console"
+  assert_contains "$ERR" 'matches the console · pinned'
+  assert_contains "$(calls)" 'authorize-security-group-ingress'   # the rule did change
 }
 
 test_keep_off_clears_it() {

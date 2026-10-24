@@ -14,7 +14,7 @@ readonly DERIVED="$FIXTURES/derived"
 
 # Discovery row columns (the row contract in lib/state.sh), for set_field.
 # shellcheck disable=SC2034  # used by the *.test.sh files that source this
-readonly COL_STATE=2 COL_LAUNCH=6 COL_REASON=9 COL_TAG=10
+readonly COL_STATE=2 COL_IP=5 COL_LAUNCH=6 COL_REASON=9 COL_TAG=10
 
 # --- Sandbox and runner ------------------------------------------------------
 # Every test gets its own HOME, so the fixed lab-key path ~/.ssh/... resolves

@@ -306,12 +306,15 @@ preflight_placement() {
 # would succeed. No security group (the group may not exist yet; the VPC's
 # default group stands in) and placeholder key material; everything else is
 # the real launch's, from the one definition in aws_run_instances. A
-# success (exit 0) is impossible for a real dry-run, so it fails too.
+# success (exit 0) is impossible for a real dry-run, so it fails too. A
+# failure with no answer (neither code) was already reported, typed, by
+# aws_expect inside the capture: its status passes on, not reported twice.
 aws_dry_run_launch() {
   local out rc=0 user_data said
   user_data=$(render_user_data "$PLACEHOLDER_PUBKEY") || return 1
   out=$(aws_run_instances 'DryRunOperation UnauthorizedOperation' "$1" "$2" "$PLACEHOLDER_FP" "$user_data" \
     --dry-run) || rc=$?
+  (( rc == 0 )) || [[ -n $out ]] || return "$rc"
   said=${out#*"$US"}
   case $(dry_run_outcome "$rc" "$said") in
     pass)   return 0 ;;
@@ -419,7 +422,10 @@ sg_perm() {
 
 # aws_delete_group <group-id> <attempts> <delay-s> — retries while EC2 still
 # reports a dependent object: an ENI of a just-terminated instance lingers
-# for a while. A group that is already gone counts as deleted.
+# for a while. A group that is already gone counts as deleted. Any other
+# failure (permission, network) is no dependency: aws_expect has already
+# reported it inside the capture, so its typed status passes on at once,
+# without a retry.
 aws_delete_group() {
   local n out rc
   for (( n = 1; n <= $2; n++ )); do
@@ -430,6 +436,7 @@ aws_delete_group() {
     case ${out%%"$US"*} in
       InvalidGroup.NotFound) return 0 ;;
       DependencyViolation)   (( n == $2 )) || { echo "security group $1 still in use; retrying in $3s"; sleep "$3"; } ;;
+      *)                     return "$rc" ;;
     esac
   done
   die "$EX_FAIL" "security group $1 is still in use after $2 attempts (DependencyViolation)" \

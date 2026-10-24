@@ -295,6 +295,29 @@ test_a_guest_that_refuses_the_key_while_booting_is_retried_until_it_lets_us_in()
   assert_contains "$OUT" "the guest's ssh does not answer yet (ubuntu@helios: Permission denied (publickey).)"
 }
 
+# The one call site of ssh_fail with the guest alias: a verified guest (its
+# pin kept) that offers another key, say one rebuilt by hand. That settles
+# the smoke check at once, with the guest's own recovery, not the host's.
+test_a_verified_guest_that_offers_another_host_key_fails_6_with_the_guest_recovery() {
+  world_running
+  pinned
+  pinned_guest
+  progress_reply unchanged | ssh_reply ssh-host-progress
+  guest_status_reply verified unchanged | ssh_reply ssh-host-status
+  ssh_reply_error ssh-guest-uname.1 255 'Host key verification failed.'
+  run_cli up
+  assert_rc 6
+  assert_contains "$ERR" 'helios-lab: the guest offered a host key other than the one pinned for it'
+  assert_contains "$ERR" '  only a guest created since it was verified has new keys, and helios-lab never recreates a verified guest'
+  assert_contains "$ERR" "  if you rebuilt it yourself, drop the pin: ssh-keygen -R <instance-id>-guest -f $(known_hosts)"
+  assert_contains "$ERR" '  ssh said: Host key verification failed.'
+  assert_not_contains "$ERR" 'interception'   # the host alias's text
+  assert_eq 1 "$(ssh_count "guest $SMOKE_CMD")" 'a changed key is not retried'
+  assert_eq 0 "$(ssh_count guest-verified)"
+  has_pin "$LAB_ID-guest" || fail 'up dropped the pin of a verified guest itself'
+  assert_contains "$ERR" "host $LAB_ID is running and billing"
+}
+
 # --- Mac: a host that stops itself mid-up ------------------------------------
 test_a_host_that_stopped_itself_mid_up_is_named_and_up_follows_the_state_machine() {
   world_running
@@ -615,6 +638,21 @@ test_status_never_probes_a_host_whose_key_is_not_pinned_or_that_this_mac_cannot_
   assert_line 1 "! this Mac's IP ($OTHER_IP) is not allowed in the security group: helios-lab up updates the rule"
   assert_eq '' "$(ssh_calls)"
   assert_contains "$OUT" "  host      not probed: this Mac's IP ($OTHER_IP) is not allowed in the security group"
+}
+
+# Between "running" and its public IP (or with none at all) there is no host
+# to probe: status says so and never tries ssh, even with the key pinned.
+test_status_never_probes_a_running_host_without_a_public_ip() {
+  world_status
+  set_field "$COL_IP" None < "$RUNNING" | reply ec2-describe-instances
+  run_status
+  assert_rc 0
+  assert_eq '' "$(ssh_calls)$(grep '^ssh-keyscan' "$STUB_LOG" || true)" 'no ssh, no key scan'
+  assert_contains "$OUT" '  host      no public IPv4 to probe'
+  assert_contains "$(sed -n 1p <<< "$OUT")" 'running · up '
+  assert_not_contains "$(sed -n 1p <<< "$OUT")" 'guest'
+  assert_not_contains "$OUT" '  ip '
+  [[ ! -e $(cfg) ]] || fail 'status rendered a fragment without an IP'
 }
 
 test_status_says_guest_intact_for_a_stopped_host_whose_guest_this_mac_reached() {

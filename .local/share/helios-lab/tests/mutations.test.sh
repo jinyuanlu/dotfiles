@@ -313,6 +313,28 @@ test_old_cli_is_refused_before_any_preflight_call() {
   assert_no_lock
 }
 
+# A first discovery that fails is not "absent": up must stop there. Read as
+# absent, it would preflight and launch while the live instance the next
+# describe-instances shows kept billing, a duplicate found only after both bill.
+test_a_failed_first_discovery_ends_up_with_its_typed_code_and_launches_nothing() {
+  world_absent
+  reply ec2-describe-instances "$RUNNING"   # every later lookup: a live lab instance
+  local spec rc text said
+  for spec in "3|Error when retrieving token from sso: Token has expired and refresh failed|the SSO session for profile 'helios-lab' has expired (ec2 describe-instances)" \
+              "8|Could not connect to the endpoint URL: \"https://ec2.ap-northeast-1.amazonaws.com/\"|cannot reach AWS (ec2 describe-instances)"; do
+    IFS='|' read -r rc text said <<< "$spec"
+    rm -rf "$STUB_AWS_DIR/.calls"; : > "$STUB_LOG"
+    reply_error_seq ec2-describe-instances 1 254 $'\n'"$text"
+    run_cli up
+    assert_rc "$rc"
+    assert_eq 1 "$(grep -cF -- "$said" <<< "$ERR")" 'the failure, reported once'
+    assert_eq describe-instances "$(aws_ops)" 'no preflight, dry-run or launch after it'
+    assert_eq 0 "$(count_of run-instances)" 'RunInstances calls'
+    assert_eq '' "$OUT"
+    assert_no_lock
+  done
+}
+
 test_root_credentials_are_refused_with_the_dedicated_identity_hint() {
   world_absent
   set_field 2 arn:aws:iam::123456789012:root < "$CALLER" | reply sts-get-caller-identity
@@ -335,6 +357,21 @@ test_dry_run_unauthorized_names_run_instances_and_the_policy_with_no_create_call
   assert_line 1 "$COST_LINE"   # the cost line comes before the dry-run
   assert_eq 1 "$(count_of run-instances)" 'only the dry-run'
   assert_eq 0 "$(count_of create-security-group)" 'CreateSecurityGroup calls'
+}
+
+test_a_dry_run_that_cannot_reach_aws_exits_8_reporting_it_once_with_no_create_call() {
+  world_absent
+  # Hand-written: the CLI's own connection failure (no capture), exit 255.
+  reply_error_seq ec2-run-instances 1 255 $'\nCould not connect to the endpoint URL: "https://ec2.ap-northeast-1.amazonaws.com/"'
+  run_cli up
+  assert_rc 8
+  assert_eq 1 "$(grep -cF 'cannot reach AWS (ec2 run-instances --dry-run)' <<< "$ERR")" 'reported once'
+  assert_not_contains "$ERR" 'ec2 run-instances --dry-run failed'
+  assert_not_contains "$ERR" 'aws said: nothing'
+  assert_eq 1 "$(count_of run-instances)" 'only the dry-run'
+  assert_eq 0 "$(count_of create-security-group)" 'CreateSecurityGroup calls'
+  assert_not_contains "$ERR" 'billing'   # no launch was in flight
+  assert_no_lock
 }
 
 test_no_default_vpc_is_a_clear_error_with_no_create_call() {
@@ -830,6 +867,28 @@ test_destroy_treats_an_already_deleted_group_as_deleted() {
   run_cli destroy --yes
   assert_rc 0
   assert_eq 1 "$(count_of delete-security-group)" 'no retry'
+}
+
+# Only DependencyViolation is worth waiting out: any other failure stops
+# destroy at once with its own typed code, not 12 retries blamed on a dependency.
+test_destroy_stops_at_a_group_delete_that_fails_for_another_reason() {
+  world_destroy '' "$LAB_GROUP"
+  rm "$STUB_AWS_DIR/ec2-delete-security-group"
+  local spec rc text said
+  for spec in "3|aws: [ERROR]: An error occurred (UnauthorizedOperation) when calling the DeleteSecurityGroup operation: You are not authorized to perform this operation.|profile 'helios-lab' may not call ec2 delete-security-group" \
+              "8|Could not connect to the endpoint URL: \"https://ec2.ap-northeast-1.amazonaws.com/\"|cannot reach AWS (ec2 delete-security-group)"; do
+    IFS='|' read -r rc text said <<< "$spec"
+    rm -rf "$STUB_AWS_DIR/.calls"; : > "$STUB_LOG"
+    reply_error ec2-delete-security-group 254 $'\n'"$text"
+    run_cli destroy --yes
+    assert_rc "$rc"
+    assert_eq 1 "$(count_of delete-security-group)" 'no retry'
+    assert_eq 1 "$(grep -cF -- "$said" <<< "$ERR")" 'reported once'
+    assert_not_contains "$ERR" 'DependencyViolation'
+    assert_not_contains "$OUT" "security group $LAB_GROUP deleted"
+    assert_eq '' "$(grep '^sleep ' "$STUB_LOG" || true)" 'no wait'
+    assert_no_lock
+  done
 }
 
 test_destroy_fails_loudly_when_a_tagged_volume_remains() {
