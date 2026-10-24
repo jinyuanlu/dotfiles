@@ -119,7 +119,7 @@ test_up_marks_the_guest_verified_only_after_both_smoke_checks_then_shows_the_rea
   assert_log_order "host sudo $HELPER_PATH status" "$(cfg) guest uname -o"   # the host is asked first
   assert_eq "guest ready in Ns · illumos · dtrace ok
   in the guest, try: $ONE_LINER  (Ctrl-C prints system calls by process)
-  the host stops itself by about 21:51 (dead-man timer, 2h after boot) · helios-lab stop pauses billing now
+  auto-stops after 60 min idle · helios-lab keep 3h to hold it · helios-lab stop when done
 next: helios-lab ssh" "$(tail -4 <<< "$OUT" | steady)"
   assert_contains "$OUT" 'guest · verified · its console is free · it starts with the host from now on'
   assert_eq '' "$ERR"
@@ -688,11 +688,14 @@ test_a_seed_download_timeout_fails_up_naming_the_seed_stage() {
 test_the_ready_screen() {
   load_cli
   export TZ=UTC
+  # U4: the push armed the idle timer, so that is the stop the screen names.
   assert_eq "guest ready in 9m48s · illumos · dtrace ok
   in the guest, try: $ONE_LINER  (Ctrl-C prints system calls by process)
-  the host stops itself by about 12:51 (dead-man timer, 2h after boot) · helios-lab stop pauses billing now
-next: helios-lab ssh" "$(ready_screen 588 "$(deadman_epoch 1792839039)")"
-  assert_eq 'guest ready · illumos · dtrace ok' "$(ready_screen '' 0 | head -1)" 'no elapsed outside up'
+  auto-stops after 60 min idle · helios-lab keep 3h to hold it · helios-lab stop when done
+next: helios-lab ssh" "$(ready_screen 588 60 none)"
+  assert_eq '  auto-stop inhibited until 13:50, then it stops after 90 min idle · helios-lab keep off clears it · helios-lab stop when done' \
+    "$(ready_screen 588 90 1792849839 | sed -n 3p)" 'a keep in force'
+  assert_eq 'guest ready · illumos · dtrace ok' "$(ready_screen '' 60 none | head -1)" 'no elapsed outside up'
 }
 
 # --- Mac and host agree ------------------------------------------------------
@@ -1133,6 +1136,9 @@ test_the_helpers_status_only_reads() {
          tools_log )
   assert_eq "systemctl show -p ActiveState --value helios-lab-provision.service
 systemctl show -p Result --value helios-lab-provision.service
+systemctl show -p ActiveState --value helios-lab-idle.timer
+systemctl show -p Result --value helios-lab-idle.service
+systemctl show -p ActiveState --value helios-lab-deadman.timer
 virsh -c qemu:///system domstate helios
 systemctl show -p ActiveState --value helios-lab-create.service
 getent hosts helios

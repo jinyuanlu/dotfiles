@@ -4,7 +4,8 @@
 # cause, status lines, the cost table, input validation (U1); preflight
 # verdicts, guest sizing, security-group convergence plans, the lab-key
 # verdict and the lifecycle messages (U6); why ssh and console refuse, the
-# host-stopped-itself line and the ready screen (U3).
+# host-stopped-itself line and the ready screen (U3); keep's duration, the
+# auto-stop phrases and which stop the lifecycle messages name (U4).
 #
 # Pure means the output depends only on the arguments (plus TZ, for the one
 # local clock time). Nothing here calls AWS, reads files or asks for `now`:
@@ -230,10 +231,9 @@ uptime_field() {
 }
 
 # status_headline <state> [type] [uptime-s] [stop-cause] [guest] [autostop]
-# The money-and-time line. [guest] and [autostop] are extension points: U3
-# passes the guest field ("guest ready", "guest intact"), U4 replaces the
-# autostop field with the host's own countdown. U1 passes "" and the
-# configured idle window.
+# The money-and-time line. [guest] is U3's field ("guest ready", "guest
+# intact"); [autostop] is the host's own countdown when its probe reports
+# one (U4, lib/remote.sh probe_autostop), else the configured idle window.
 status_headline() {
   local state=$1 type=${2:-} up=${3:-} cause=${4:-} guest=${5:-} autostop=${6:-}
   case $state in
@@ -247,8 +247,80 @@ status_headline() {
   esac
 }
 
-# autostop_field <idle-minutes> -> the U1 auto-stop field (U4 replaces it)
+# --- Auto-stop and keep (U4) -------------------------------------------------
+# The host's idle check runs every IDLE_CHECK_S (host/helios-lab-idle.timer)
+# and powers it off after the idle window; keep holds that off for at most
+# KEEP_CAP_S, which the host enforces too (host/helios-lab-host keep_until).
+# Named apart from the helper's own constants (IDLE_TICK_S, KEEP_MAX_S),
+# which tests/idle.test.sh checks these agree with.
+readonly IDLE_CHECK_S=300 KEEP_CAP_S=43200
+
+# autostop_field <idle-minutes> -> "auto-stops after 60 min idle": the window,
+# for a host whose countdown hasn't started (or that status can't ask)
 autostop_field() { echo "auto-stops after $1 min idle"; }
+
+# autostop_in <minutes> -> "auto-stops in ~42 min"
+autostop_in() { echo "auto-stops in ~$1 min"; }
+
+# inhibited_field <deadline epoch> -> "auto-stop inhibited until 14:05"
+inhibited_field() { echo "auto-stop inhibited until $(local_hhmm "$1")"; }
+
+# deadman_field <dead-man epoch> -> "stops itself by about 12:51 (dead-man timer)"
+deadman_field() { echo "stops itself by about $(local_hhmm "$1") (dead-man timer)"; }
+
+# idle_minutes_left <now> <last check's epoch> <count> <required> -> minutes
+# until the check that powers the host off, if it stays idle: that is check
+# number <required>, (required - count) checks after the last one; at least 1
+idle_minutes_left() {
+  local left=$(( $4 - $3 )) s
+  (( left >= 1 )) || left=1
+  s=$(( $2 + left * IDLE_CHECK_S - $1 ))
+  (( s >= 60 )) || s=60
+  echo $(( (s + 59) / 60 ))
+}
+
+# keep_seconds <duration> -> its seconds, for <n>m or <n>h from 1m to 12h
+# (90m, 3h, 12h); fails on anything else: 13h, 0h, -1h, 1d, forever, ""
+keep_seconds() {
+  local re='^([1-9][0-9]{0,3})([mh])$' n s
+  [[ $1 =~ $re ]] || return 1
+  n=${BASH_REMATCH[1]}
+  case ${BASH_REMATCH[2]} in
+    m) s=$(( n * 60 )) ;;
+    h) s=$(( n * 3600 )) ;;
+  esac
+  (( s <= KEEP_CAP_S )) || return 1
+  echo "$s"
+}
+
+# keep_line <the host's keep reply> <idle-minutes> -> what keep prints; fails
+# on a reply that is neither "off" nor a deadline
+keep_line() {
+  case $1 in
+    off) join_dot 'keep · cleared' "the host auto-stops after $2 min idle" ;;
+    *)   [[ $1 =~ ^[1-9][0-9]{0,11}$ ]] || return 1
+         join_dot "keep · $(inhibited_field "$1"), then it stops after $2 min idle" 'helios-lab keep off clears it' ;;
+  esac
+}
+
+# armed_stop <stop> <dead-man epoch|""> <idle-minutes> -> how the host stops
+# itself, for the lifecycle messages. <stop> is what up knows is armed:
+#   deadman  a host this up launched, before its first push (user-data's
+#            dead-man timer: 2h after boot)
+#   idle     after this up's push, which armed the idle timer and only then
+#            disarmed the dead-man timer (host/helios-lab-host install)
+#   either   an existing host before this up's push: an earlier up armed the
+#            idle timer, unless none ever finished its push
+# "" for the epoch means the boot time is unknown (a call in flight).
+armed_stop() {
+  local by='2h after boot'
+  [[ -z $2 ]] || by="by about $(local_hhmm "$2")"
+  case $1 in
+    deadman) if [[ -n $2 ]]; then echo "$by (dead-man timer, 2h after boot)"; else echo "$by (dead-man timer)"; fi ;;
+    idle)    echo "after $3 min idle (idle timer)" ;;
+    *)       echo "after $3 min idle (idle timer), or $by if no up has pushed to it yet (dead-man timer)" ;;
+  esac
+}
 
 # status_details <id> <az> <type> <public-ip> -> indented detail lines
 status_details() {
@@ -262,7 +334,10 @@ status_details() {
 # anomaly <kind> [args] — kinds: duplicates, orphan-group, stuck-stopping,
 # ip-not-allowed, ip-unknown (U1); from status's host probe (U3):
 # guest-mismatch <text>, provision-failed <stage> <reason>,
-# host-silent <seconds> <ssh said>, probe-failed <what>
+# host-silent <seconds> <ssh said>, probe-failed <what>; and its idle facts
+# (U4): idle-error <problem>, idle-crashed <systemd Result>,
+# idle-unarmed <timer state> <HH:MM>, stop-unarmed <idle state> <dead-man
+# state>, deadman-armed <HH:MM>
 anomaly() {
   case $1 in
     duplicates)       printf '! %s\n' "$2" ;;
@@ -274,6 +349,11 @@ anomaly() {
     provision-failed) printf '! provision failed at stage %s: %s; helios-lab up runs it again\n' "$2" "$3" ;;
     host-silent)      printf '! the host did not answer ssh within %ss (%s): it may be stopping itself; helios-lab up reconnects\n' "$2" "$3" ;;
     probe-failed)     printf "! the host's status probe failed (%s): helios-lab up pushes the current helper\n" "$2" ;;
+    idle-error)       printf "! the last idle check failed (%s): it counts what it can't use as idle, so it fails toward a stop; why: helios-lab ssh host journalctl -u helios-lab-idle\n" "$2" ;;
+    idle-crashed)     printf '! the last idle check did not finish (systemd: %s), so idle time may go uncounted: helios-lab up pushes the current helper; why: helios-lab ssh host journalctl -u helios-lab-idle\n' "$2" ;;
+    idle-unarmed)     printf '! the idle timer is not armed (%s): the dead-man timer stops the host by about %s; helios-lab up arms the idle timer\n' "$2" "$3" ;;
+    stop-unarmed)     printf '! no stop is armed (idle timer %s, dead-man timer %s): the host bills until helios-lab stop; helios-lab up arms the idle timer\n' "$2" "$3" ;;
+    deadman-armed)    printf '! the dead-man timer is still armed: it stops the host by about %s even while in use; helios-lab up disarms it\n' "$2" ;;
     *)                return 1 ;;
   esac
 }
@@ -559,11 +639,14 @@ type_override_note() {
   echo "HELIOS_LAB_INSTANCE_TYPE=$1 applies only at create; $3 stays $2"
 }
 
-# running_line <id> <public-ip> <type> <deadman-epoch> -> the line up ends its
-# instance stage with
+# running_line <id> <public-ip> <type> <deadman-epoch> <stop> -> the line up
+# ends its instance stage with. A host this up launched (<stop> deadman)
+# names its dead-man time; for an existing host up can't know yet which stop
+# is armed (armed_stop's either), so the push line and the ready screen say.
 running_line() {
-  join_dot 'host running' "$1" "$2" "$(hourly_cost "$3")" \
-    "stops itself by about $(local_hhmm "$4") (dead-man timer)"
+  local stops=''
+  [[ $5 != deadman ]] || stops=$(deadman_field "$4")
+  join_dot 'host running' "$1" "$2" "$(hourly_cost "$3")" "$stops"
 }
 
 # stopped_line -> what stop ends with: compute billing ended, storage didn't
@@ -597,34 +680,43 @@ stopped_while_connecting() {
   esac
 }
 
-# ready_screen <elapsed-s|""> <dead-man epoch> -> what a successful up ends
-# with (R14): the smoke check's result, one DTrace one-liner to try in the
-# guest, the stop that is armed, then one runnable next command.
-# --- Extension point (U4) ---
-# Until U4's push enables the idle timer, the dead-man timer is the armed
-# stop, so that is what this names; U4 replaces it with the idle countdown
-# and the keep note.
+# ready_screen <elapsed-s|""> <idle-minutes> <keep deadline|none> -> what a
+# successful up ends with (R14): the smoke check's result, one DTrace
+# one-liner to try in the guest, the stop that is armed and how to hold or
+# end it, then one runnable next command. The stop is the idle timer: up
+# reaches this screen only after its push's install armed it (and then
+# disarmed the dead-man timer), and the window is the one that push carried.
 readonly DTRACE_TRY="pfexec dtrace -n 'syscall:::entry { @[execname] = count(); }'"
 ready_screen() {
   join_dot "guest ready${1:+ in $(fmt_elapsed "$1")}" illumos 'dtrace ok'
   echo "  in the guest, try: $DTRACE_TRY  (Ctrl-C prints system calls by process)"
-  echo "  the host stops itself by about $(local_hhmm "$2") (dead-man timer, 2h after boot) · helios-lab stop pauses billing now"
+  echo "  $(ready_stop_note "$2" "$3") · helios-lab stop when done"
   echo 'next: helios-lab ssh'
 }
 
-# billing_notice <instance-id|""> <type> <launch-epoch> -> what a failed or
-# interrupted up prints once a host may be billing. An empty id means a launch
-# or start call was in flight, so whether a host exists is unknown.
-# Invariant (plan): from launch onward every boot has a stop armed. Until U4's
-# push enables the idle timer, that is the user-data dead-man timer; U4 names
-# the idle timer here once it exists.
+# ready_stop_note <idle-minutes> <keep deadline|none> -> the idle stop, and
+# the keep that holds it off or clears its hold
+ready_stop_note() {
+  if [[ $2 =~ ^[1-9][0-9]*$ ]]; then
+    echo "$(inhibited_field "$2"), then it stops after $1 min idle · helios-lab keep off clears it"
+  else
+    echo "$(autostop_field "$1") · helios-lab keep 3h to hold it"
+  fi
+}
+
+# billing_notice <instance-id|""> <type> <launch-epoch|""> <stop> <idle-minutes>
+# -> what a failed or interrupted up prints once a host may be billing. An
+# empty id means a launch or start call was in flight, so whether a host
+# exists is unknown. <stop>: armed_stop's deadman, idle or either.
+# Invariant (plan): from launch onward every boot has a stop armed: the
+# user-data dead-man timer until a push arms the idle timer, then that one.
 billing_notice() {
   if [[ -z $1 ]]; then
     printf '%s\n' 'a launch or start was in flight: helios-lab status shows whether the host is up' \
-      "  a running host bills $(hourly_cost "$2") until its dead-man timer stops it, 2h after boot"
+      "  a running host bills $(hourly_cost "$2") until it stops itself $(armed_stop "$4" '' "$5")"
   else
     printf '%s\n' "host $1 is running and billing ($(hourly_cost "$2"))" \
-      "  it stops itself by about $(local_hhmm "$(deadman_epoch "$3")") (dead-man timer, 2h after boot)"
+      "  it stops itself $(armed_stop "$4" "$(deadman_epoch "$3")" "$5")"
   fi
   echo '  helios-lab up reattaches · helios-lab stop pauses it now'
 }

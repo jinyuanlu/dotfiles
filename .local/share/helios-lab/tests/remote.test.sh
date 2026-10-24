@@ -351,7 +351,7 @@ test_up_verifies_pushes_starts_and_follows_on_a_running_host() {
   export TZ=Asia/Tokyo
   run_cli up
   assert_rc 0
-  assert_eq "host running · $LAB_ID · $HOST_IP · ≈\$0.27/hr · stops itself by about 21:51 (dead-man timer)
+  assert_eq "host running · $LAB_ID · $HOST_IP · ≈\$0.27/hr
 host key · waiting for $LAB_ID's fingerprints on its console
 host key · ED25519 $HOST_FP matches the console · pinned · Ns
 push · host code and config installed · idle 60 min · engvm @8ef18ef
@@ -361,7 +361,7 @@ first boot · waiting for the guest's smoke check (up to 0m)
 guest · verified · its console is free · it starts with the host from now on
 guest ready in Ns · illumos · dtrace ok
   in the guest, try: pfexec dtrace -n 'syscall:::entry { @[execname] = count(); }'  (Ctrl-C prints system calls by process)
-  the host stops itself by about 21:51 (dead-man timer, 2h after boot) · helios-lab stop pauses billing now
+  auto-stops after 60 min idle · helios-lab keep 3h to hold it · helios-lab stop when done
 next: helios-lab ssh" "$(steady <<< "$OUT" | sed -E 's/^(guest ready in )[0-9]+s/\1Ns/')"
   assert_eq '' "$ERR"
   local cfg=$HELIOS_LAB_STATE_DIR/ssh_config
@@ -424,29 +424,39 @@ test_an_edited_host_file_reaches_the_host_on_the_next_up() {
   assert_eq '# edited in the repo' "$(tail -1 "$SANDBOX/pushed/helios-lab-provision.service")"
 }
 
-test_pushed_files_install_where_the_unit_expects_them_and_the_dead_man_stays_armed() {
+test_pushed_files_install_where_the_units_expect_them_then_the_stop_is_handed_over() {
   world_running
   run_cli up
   assert_rc 0
   local stage=$SANDBOX/tmp/helios-lab-push.test root=$SANDBOX/root
   unpack_push 1 "$stage"
   host_env
+  mkdir -p "$root/etc/systemd/system"
+  : > "$root/etc/systemd/system/helios-lab-deadman.timer"   # user-data's
   # shellcheck disable=SC2329  # called by cmd_install
   systemctl() { echo "systemctl $*" >> "$SANDBOX/systemctl.log"; }
-  local printed
+  # shellcheck disable=SC2329  # called by cmd_install; never the Mac's real sshd
+  sshd() { echo "sshd $*" >> "$SANDBOX/systemctl.log"; }
+  local printed f
   printed=$(cmd_install "$stage")
   [[ $printed =~ ^[0-9]+$ ]] || fail "install should print only its epoch, printed: $printed"
   cmp -s "$HELPER" "$root$HELPER_PATH" || fail 'the helper differs once installed'
   [[ -x $root$HELPER_PATH ]] || fail 'the helper is not executable'
-  cmp -s "$UNIT_FILE" "$root/etc/systemd/system/helios-lab-provision.service" || fail 'the unit differs'
-  [[ ! -x $root/etc/systemd/system/helios-lab-provision.service ]] || fail 'the unit is executable'
+  for f in helios-lab-provision.service helios-lab-idle.service helios-lab-idle.timer; do
+    cmp -s "$HELIOS_LAB_HOME/host/$f" "$root/etc/systemd/system/$f" || fail "$f differs"
+    [[ ! -x $root/etc/systemd/system/$f ]] || fail "$f is executable"
+  done
+  cmp -s "$HELIOS_LAB_HOME/host/sshd-helios-lab.conf" "$root/etc/ssh/sshd_config.d/10-helios-lab.conf" || fail 'the sshd drop-in differs'
   assert_eq "$( ( load_cli; render_host_config 60 "$PIN" ) )" "$(<"$root/etc/helios-lab/host.conf")"
-  assert_eq 'systemctl daemon-reload' "$(<"$SANDBOX/systemctl.log")" 'systemd calls'
+  # U4: the idle timer is armed first, and only then the dead-man disarmed
+  # (idle.test.sh: no disarm when arming fails).
+  assert_eq 'systemctl daemon-reload
+sshd -t
+systemctl try-reload-or-restart ssh.service
+systemctl enable --now helios-lab-idle.timer
+systemctl is-active --quiet helios-lab-idle.timer
+systemctl disable --now helios-lab-deadman.timer' "$(<"$SANDBOX/systemctl.log")" 'what install runs'
   [[ ! -e $stage ]] || fail 'the push directory was left behind'
-  # Until U4: neither the push nor the install touches the dead-man timer
-  # (only comments, at the U4 extension point, name it).
-  assert_not_contains "$(code_of "$(<"$STUB_SSH_DIR/.stdin/ssh-host-bash.1")")" 'deadman'
-  assert_not_contains "$PUSH_CMD$(<"$SANDBOX/systemctl.log")$(ssh_calls)" 'deadman'
 }
 
 test_install_refuses_an_unknown_file_and_a_directory_not_named_like_the_push() {

@@ -427,7 +427,8 @@ test_up_running_converged_makes_no_write_and_no_group_line() {
   assert_rc 0
   assert_no_mutation
   assert_contains "$(calls)" "aws ec2 describe-security-group-rules --filters Name=group-id,Values=$LAB_GROUP --query SecurityGroupRules[].[SecurityGroupRuleId,IsEgress,IpProtocol,FromPort,ToPort,CidrIpv4]"
-  assert_line 1 "host running · $LAB_ID · $FIXTURE_IP · ≈\$0.27/hr · stops itself by about 21:51 (dead-man timer)"
+  # An existing host: which stop is armed is the push's to say (U4), not this line's.
+  assert_line 1 "host running · $LAB_ID · $FIXTURE_IP · ≈\$0.27/hr"
   assert_eq "$UP_LAST_LINE" "$(tail -1 <<< "$OUT")" 'last line'
   assert_eq '' "$ERR"
 }
@@ -555,6 +556,22 @@ test_a_failed_step_after_launch_says_the_host_bills_and_when_it_stops() {
   assert_no_lock
 }
 
+test_a_failure_after_the_push_names_the_idle_timer_not_the_dead_man() {
+  world_absent
+  export TZ=Asia/Tokyo
+  # Hand-written in the progress protocol (tests/lib.sh), as remote.test.sh does.
+  progress_reply guard-failed | ssh_reply ssh-host-progress
+  ssh_reply ssh-host-journal < /dev/null
+  run_cli up
+  assert_rc 1
+  assert_contains "$OUT" 'stops itself by about 21:51 (dead-man timer)'   # before the push: a fresh host's
+  assert_contains "$ERR" "host $LAB_ID is running and billing (≈\$0.27/hr)"
+  # U4: the push armed the idle timer and only then disarmed the dead-man
+  # timer, so from there on the idle timer is what stops the host.
+  assert_contains "$ERR" '  it stops itself after 60 min idle (idle timer)'
+  assert_not_contains "$ERR" 'dead-man'
+}
+
 test_a_failed_wait_after_launch_prints_the_billing_notice() {
   world_absent
   export TZ=UTC
@@ -592,7 +609,7 @@ test_ctrl_c_after_launch_prints_the_notice_and_releases_the_lock() {
 # $BASHPID: an exec'd sh's parent is this shell)
 interrupted_after_launch() {
   lock_acquire
-  arm_notice "$LAB_ID" m8i.xlarge "$LAUNCH_EPOCH"
+  arm_notice "$LAB_ID" m8i.xlarge "$LAUNCH_EPOCH" deadman
   # shellcheck disable=SC2016  # $PPID is the sh's own
   kill -INT "$(exec sh -c 'echo $PPID')"
   echo 'not interrupted'
@@ -614,8 +631,17 @@ test_billing_notice_names_the_dead_man_time() {
   export TZ=UTC
   assert_eq "host $LAB_ID is running and billing (≈\$0.27/hr)
   it stops itself by about 12:51 (dead-man timer, 2h after boot)
-  helios-lab up reattaches · helios-lab stop pauses it now" "$(billing_notice "$LAB_ID" m8i.xlarge "$LAUNCH_EPOCH")"
-  assert_contains "$(billing_notice '' m8i.xlarge '')" 'a launch or start was in flight: helios-lab status shows whether the host is up'
+  helios-lab up reattaches · helios-lab stop pauses it now" "$(billing_notice "$LAB_ID" m8i.xlarge "$LAUNCH_EPOCH" deadman 60)"
+  assert_eq "a launch or start was in flight: helios-lab status shows whether the host is up
+  a running host bills ≈\$0.27/hr until it stops itself 2h after boot (dead-man timer)" \
+    "$(billing_notice '' m8i.xlarge '' deadman 60 | sed -n 1,2p)" 'a launch in flight'
+  # U4: after a push the idle timer is the stop; before it, on an existing
+  # host, either one may be (an earlier up armed the idle timer, or none did).
+  assert_eq '  it stops itself after 90 min idle (idle timer)' "$(billing_notice "$LAB_ID" m8i.xlarge "$LAUNCH_EPOCH" idle 90 | sed -n 2p)"
+  assert_eq '  it stops itself after 60 min idle (idle timer), or by about 12:51 if no up has pushed to it yet (dead-man timer)' \
+    "$(billing_notice "$LAB_ID" m8i.xlarge "$LAUNCH_EPOCH" either 60 | sed -n 2p)"
+  assert_eq "  a running host bills ≈\$0.27/hr until it stops itself after 60 min idle (idle timer), or 2h after boot if no up has pushed to it yet (dead-man timer)" \
+    "$(billing_notice '' m8i.xlarge '' either 60 | sed -n 2p)" 'a start in flight'
   assert_eq $(( LAUNCH_EPOCH - 39 + 7260 )) "$(deadman_epoch "$LAUNCH_EPOCH")" 'rounded up to the minute'
   assert_eq 1792846200 "$(deadman_epoch 1792839000)" 'a whole minute stays'
   assert_eq "$LAUNCH_EPOCH" "$(launch_epoch 2026-10-24T10:50:39+00:00 0)"

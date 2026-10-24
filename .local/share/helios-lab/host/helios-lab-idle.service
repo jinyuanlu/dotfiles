@@ -1,0 +1,23 @@
+# helios-lab-idle.service — one idle check (helios-lab-host idle-check):
+# reset the idle count, add to it, or power the host off once it has been
+# idle for the whole window. Started every 5 min by helios-lab-idle.timer;
+# pushed by helios-lab up, installed by helios-lab-host install. The rule,
+# the inputs and the fail-closed handling: helios-lab-host, "Idle (pure)".
+[Unit]
+Description=helios-lab idle check: power off after the idle window (stop, never terminate)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/helios-lab/helios-lab-host idle-check
+# A oneshot has no start timeout by default, and a hung check would hold
+# off every later one; each input is bounded at 10 s, and this bounds the rest.
+TimeoutStartSec=2min
+StandardInput=null
+# Fail closed even when the helper itself crashes (a non-zero exit, signal or
+# timeout it never got to handle): plain sh, independent of the helper, counts
+# consecutive failed runs in /run (cleared on boot and on any success) and
+# powers off after 12 of them, one hour at the 5-min cadence. Instance-initiated
+# shutdown is "stop", so this can only stop. ($$ escapes $ from systemd.)
+ExecStopPost=/bin/sh -c 'f=/run/helios-lab/idle-crashes; mkdir -p /run/helios-lab; if [ "$$SERVICE_RESULT" = success ]; then rm -f "$$f"; exit 0; fi; n=$$(( $$(cat "$$f" 2>/dev/null || echo 0) + 1 )); echo "$$n" > "$$f"; if [ "$$n" -ge 12 ]; then systemctl poweroff; fi; exit 0'
+
+# No [Install]: the timer starts it.

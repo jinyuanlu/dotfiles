@@ -134,6 +134,7 @@ lock_acquire() {
   "$SHLOCK" -p "$$" -f "$LOCK_FILE" || die "$EX_CONFLICT" \
     "another helios-lab up, stop or destroy is running (pid $(cat "$LOCK_FILE" 2>/dev/null || echo unknown))" \
     'wait for it to finish; once that process is gone, the next run takes the lock over'
+  rm -f "$NOTICE_FILE"   # a killed run's, whose pid this one reuses
 }
 
 # state_dir_ensure — the state dir holds the lock, the ssh fragment and the
@@ -147,22 +148,39 @@ lock_release() {
   if [[ $(cat "$LOCK_FILE" 2>/dev/null) == "$$" ]]; then rm -f "$LOCK_FILE"; fi
 }
 
-# on_exit [<instance-id|""> <type> <launch-epoch>] — the EXIT trap. Once up
-# holds a host that may be billing (arm_notice), a failure or Ctrl-C prints
-# the billing notice; then the lock goes. set +e because a failing command in
-# an EXIT trap would replace the exit status.
+# on_exit [<instance-id|""> <type> <launch-epoch> <stop> <idle-minutes>] —
+# the EXIT trap. Once up holds a host that may be billing (arm_notice), a
+# failure or Ctrl-C prints the billing notice; then the lock goes. set +e
+# because a failing command in an EXIT trap would replace the exit status.
+# The stop it names is <stop>, unless this up's push has since handed the
+# stop to the idle timer (notice_signal).
 on_exit() {
-  local rc=$?
+  local rc=$? pushed
   set +e
-  if (( $# > 0 )) && notice_due "$rc" "$1"; then billing_notice "$@" >&2; fi
+  if (( $# > 0 )) && notice_due "$rc" "$1"; then
+    pushed=$(cat "$NOTICE_FILE" 2>/dev/null)
+    billing_notice "$1" "$2" "$3" "${pushed:-$4}" "$5" >&2
+  fi
+  rm -f "$NOTICE_FILE"
   lock_release
 }
 
-# arm_notice <instance-id|""> <type> <launch-epoch|""> — from here on, a
-# failure or Ctrl-C says the host is billing. "" means a launch or start call
-# is in flight. The values are quoted into the trap now, on purpose.
+# arm_notice <instance-id|""> <type> <launch-epoch|""> <stop> — from here on,
+# a failure or Ctrl-C says the host is billing, and which stop is armed
+# (state.sh armed_stop: deadman, idle or either). "" means a launch or start
+# call is in flight. The values are quoted into the trap now, on purpose.
 # shellcheck disable=SC2064
-arm_notice() { trap "on_exit $(printf '%q ' "$@")" EXIT; }
+arm_notice() { trap "on_exit $(printf '%q ' "$@" "$IDLE_MINUTES")" EXIT; }
+
+# notice_signal <stop> — once this up's push has armed the idle timer (and
+# disarmed the dead-man timer), the billing notice names that stop, for the
+# rest of this up (a later restart boots with it armed too). up_connect runs
+# in a subshell, which has no traps and can't set this shell's, and a Ctrl-C
+# ends both before either could pass a value back, so it is a file beside
+# the lock, named for this process ($$ is the same in the subshell) and
+# removed with it. Best effort: the state dir held the lock a moment ago.
+readonly NOTICE_FILE="$STATE_DIR/stop.$$"
+notice_signal() { printf '%s\n' "$1" > "$NOTICE_FILE" 2>/dev/null || true; }
 
 # notice_due <exit-status> <instance-id|""> -> 0 when the notice must print.
 # A known host: on any failure. A call in flight: only when its outcome is
@@ -270,27 +288,26 @@ status_absent() {
 }
 
 # status_one <row> — a running host is also probed over ssh (U3): one
-# 3-second, read-only look at its provisioning and its guest
-# (lib/remote.sh host_probe), and only when this Mac's IP is allowed. The
-# probe goes first, so its anomalies print above the headline too.
+# 3-second, read-only look at its provisioning, its idle check (U4) and its
+# guest (lib/remote.sh host_probe), and only when this Mac's IP is allowed.
+# The probe goes first, so its anomalies print above the headline too. The
+# auto-stop field is the host's own: a keep's deadline, the idle countdown,
+# or the dead-man time while that is the stop armed (probe_autostop).
 status_one() {
-  local id state type az ip launch group code reason now access='' probe=''
+  local id state type az ip launch group code reason now deadman access='' probe=''
   IFS=$US read -r id state type az ip launch group code reason <<< "$1"
   now=$(date +%s)
+  deadman=$(deadman_epoch "$(launch_epoch "$launch" "$now")")
   if [[ $state == running ]]; then
     access=$(caller_access "$group") || return
     probe=$(host_probe "$id" "$ip" "$access")
   fi
   status_anomalies "$state" "$reason" "$now" "$access"
-  probe_anomalies "$probe"
-  status_headline "$state" "$type" "$(uptime_s "$launch" "$now")" \
-    "$(stop_cause "$code" "$reason")" "$(guest_headline_field "$state" "$id" "$probe")" "$(autostop_field "$IDLE_MINUTES")"
+  probe_anomalies "$probe" "$deadman"
+  status_headline "$state" "$type" "$(uptime_s "$launch" "$now")" "$(stop_cause "$code" "$reason")" \
+    "$(guest_headline_field "$state" "$id" "$probe")" "$(probe_autostop "$probe" "$now" "$deadman" "$IDLE_MINUTES")"
   status_details "$id" "$az" "$type" "$ip"
   [[ $state != running ]] || probe_details "$probe"
-  # --- Extension point (U4) ---
-  # The idle countdown, keep-until and a failed idle run come from the same
-  # probe; U4 replaces the autostop field above with the host's own countdown.
-  # They must stay read-only, like everything in status.
 }
 
 # status_anomalies <state> <reason> <now> <caller access>
@@ -350,8 +367,8 @@ cmd_up() {
     start)            up_existing "$row"; up_start "$id" "$type" "$az" ;;
     wait-then-start)  up_existing "$row"; up_wait "$id" instance-stopped stopping; up_start "$id" "$type" "$az" ;;
     none)             up_existing "$row"
-                      arm_notice "$id" "$type" "$(launch_epoch "$launch" "$(date +%s)")"
-                      up_running "$id" '' ;;
+                      arm_notice "$id" "$type" "$(launch_epoch "$launch" "$(date +%s)")" either
+                      up_running "$id" '' either ;;
   esac
 }
 
@@ -461,34 +478,38 @@ caller_ip_or_die() {
 
 # up_launch <subnet-id<US>az> <group-id> <key-fingerprint> — the one launch.
 # A launch call in flight already arms the notice: interrupted, nobody knows
-# whether a host exists.
+# whether a host exists. Until its first push, a host this up launched has
+# exactly the user-data dead-man timer armed.
 up_launch() {
   local subnet=${1%%"$US"*} az=${1#*"$US"} user_data started launched id launch
   user_data=$(render_user_data "$(cat "$LAB_KEY.pub")") \
     || die "$EX_FAIL" "$LAB_KEY.pub is not an ed25519 public key"
   started=$(date +%s)
-  arm_notice '' "$INSTANCE_TYPE" ''
+  arm_notice '' "$INSTANCE_TYPE" '' deadman
   launched=$(aws_launch "$INSTANCE_TYPE" "$subnet" "$az" "$2" "$3" "$user_data")
   IFS=$US read -r id launch <<< "$launched"
-  arm_notice "$id" "$INSTANCE_TYPE" "$(launch_epoch "$launch" "$started")"
+  arm_notice "$id" "$INSTANCE_TYPE" "$(launch_epoch "$launch" "$started")" deadman
   echo "instance $id launched in $az · waiting for running"
-  up_running "$id" "$started"
+  up_running "$id" "$started" deadman
 }
 
-# up_start <instance-id> <type> <az> [connect] — [connect] as up_running's
+# up_start <instance-id> <type> <az> [connect] — [connect] as up_running's.
+# An existing host: which stop is armed depends on whether an earlier up
+# finished its push, so the notice says either until this up's push.
 up_start() {
   local started
   started=$(date +%s)
   echo "starting $1 · billing resumes at $(hourly_cost "$2")"
-  arm_notice '' "$2" ''
+  arm_notice '' "$2" '' either
   aws_start "$1" "$2" "$3"
-  arm_notice "$1" "$2" "$started"
-  up_running "$1" "$started" "${4:-up_connect_following}"
+  arm_notice "$1" "$2" "$started" either
+  up_running "$1" "$started" either "${4:-up_connect_following}"
 }
 
-# up_running <instance-id> <started-epoch|""> [connect] — wait for running,
-# then the post-launch re-lookup, then connect: up_connect_following, unless
-# a caller that already followed a stop names plain up_connect. Invariant: at
+# up_running <instance-id> <started-epoch|""> <stop> [connect] — wait for
+# running, then the post-launch re-lookup, then connect: up_connect_following,
+# unless a caller that already followed a stop names plain up_connect. <stop>
+# is the stop armed until this up's push (state.sh armed_stop). Invariant: at
 # most one live tagged instance; a duplicate (another Mac's concurrent up,
 # say) exits 4 and is never resolved automatically.
 up_running() {
@@ -499,10 +520,10 @@ up_running() {
   [[ $id == "$1" && $state == running ]] || die "$EX_CONFLICT" \
     "after waiting for $1 to run, discovery found: $(instance_list "$row")" 'helios-lab status shows the details'
   boot=$(launch_epoch "$launch" "$(date +%s)")
-  arm_notice "$id" "$type" "$boot"
+  arm_notice "$id" "$type" "$boot" "$3"
   [[ -z $2 ]] || echo "instance $id running · $(fmt_elapsed $(( $(date +%s) - $2 )))"
-  running_line "$id" "$ip" "$type" "$(deadman_epoch "$boot")"
-  "${3:-up_connect_following}" "$row"
+  running_line "$id" "$ip" "$type" "$(deadman_epoch "$boot")" "$3"
+  "${4:-up_connect_following}" "$row"
 }
 
 # up_connect_following <row> — up_connect, and when ssh to the host fails on
@@ -547,24 +568,26 @@ up_follow_stop() {
 # IP, host/ and its config are pushed (every up: R13), and the provision
 # unit is started and followed stage by stage: packages, libvirt, guard,
 # engvm, seed (with the RFD 26 line) and guest. Then the smoke check through
-# the guest alias (lib/remote.sh guest_bringup) and the ready screen.
-# Invariant: from launch onward every boot has a stop armed; until U4,
-# nothing here touches the dead-man timer.
+# the guest alias (lib/remote.sh guest_bringup) and the ready screen, with
+# the keep in force, if any.
+# Invariant: from launch onward every boot has a stop armed. The push's
+# install arms the idle timer before it disarms the dead-man timer, and dies
+# otherwise, so once host_push returns the idle timer is the stop armed, and
+# the notice says so from then on (notice_signal).
 up_connect() {
-  local id state type az ip launch rest pushed
+  local id state type az ip launch rest pushed reply
   IFS=$US read -r id state type az ip launch rest <<< "$1"
   host_reach "$id" "$ip"
-  pushed=$(host_push)
+  pushed=$(host_push) || return
   push_line
+  notice_signal idle
   provision_start
   provision_follow "$pushed"
   [[ ${UP_VERBOSE:-quiet} != verbose ]] || provision_journal_print
   echo 'host ready · KVM, libvirt and the metadata guard are in place'
-  guest_bringup "$id"
-  # --- Extension point (U4) ---
-  # The push enables the idle timer, then disarms the dead-man timer; the
-  # ready screen then names the idle countdown and keep (state.sh).
-  ready_screen "$(up_elapsed)" "$(deadman_epoch "$(launch_epoch "$launch" "$(date +%s)")")"
+  reply=$(host_status) || return
+  guest_bringup "$id" "$reply"
+  ready_screen "$(up_elapsed)" "$IDLE_MINUTES" "$(inhibit_of "$reply")"
 }
 
 # up_elapsed -> seconds since this up started, or nothing outside cmd_up
@@ -587,6 +610,7 @@ require_jump_safe() {
 # pin the host's key (host_reach), then hand the terminal to ssh. Their own
 # notices go to stderr, so `helios-lab ssh guest cmd > file` captures only
 # cmd's output. Neither takes the lock: they change nothing up guards.
+readonly SESSIONS_NEVER_START="$SELF ssh and console never start the host themselves: it bills while it runs"
 
 # cmd_ssh [guest|host] [cmd...] — the guest by default; extra words are the
 # remote command, joined as ssh joins them
@@ -595,7 +619,7 @@ cmd_ssh() {
   alias=$(ssh_alias "$@")
   command=$(ssh_command "$@")
   [[ $alias != guest ]] || require_jump_safe
-  connect_running >&2
+  connect_running "$SESSIONS_NEVER_START" >&2
   ssh_session "$alias" "$command"
 }
 
@@ -606,22 +630,50 @@ cmd_ssh() {
 # by the next up.
 cmd_console() {
   (( $# == 0 )) || die "$EX_USAGE" 'console takes no arguments' "try: $SELF help"
-  connect_running >&2
+  connect_running "$SESSIONS_NEVER_START" >&2
   console_session
 }
 
-# connect_running — the one live instance must be running; then the steps
-# every connecting command takes before its first ssh
+# connect_running <why it refuses a host that isn't running> — the one live
+# instance must be running; then the steps every connecting command takes
+# before its first ssh
 connect_running() {
   local row id state type az ip launch group code reason
   row=$(discover_single)
   IFS=$US read -r id state type az ip launch group code reason <<< "$row"
-  [[ $state == running ]] || die "$EX_FAIL" "$(not_running_message "${state:-absent}" "$id" "$code" "$reason")" \
-    "$SELF ssh and console never start the host themselves: it bills while it runs"
+  [[ $state == running ]] || die "$EX_FAIL" "$(not_running_message "${state:-absent}" "$id" "$code" "$reason")" "$1"
   lab_key_check "$id"
   [[ -n $group && $group != None ]] || die "$EX_FAIL" "$id has no security group" 'helios-lab status shows the details'
   ingress_refresh "$group"
   host_reach "$id" "$ip"
+}
+
+# --- keep --------------------------------------------------------------------
+# keep <duration>|off — holds off the idle auto-stop until a deadline at most
+# 12h ahead, or clears it. Like ssh it reaches a running host only (ingress,
+# the lab key, the pinned host key) and never starts one. The host takes the
+# deadline on its own clock, enforces the cap again, and keeps it on disk,
+# so it survives a stop and start: it is a wall-clock deadline, inert once
+# passed. After it, the idle window counts again from its start. No lock:
+# keep changes nothing up, stop or destroy guard.
+cmd_keep() {
+  local arg reply line
+  arg=$(keep_arg "$@")
+  connect_running "$SELF keep never starts the host: it bills while it runs"
+  reply=$(keep_set "$arg")
+  line=$(keep_line "$reply" "$IDLE_MINUTES") \
+    || die "$EX_FAIL" "the host answered '$(first_line "$reply")' to keep, neither a deadline nor off" \
+         'helios-lab up pushes the current helper'
+  echo "$line"
+}
+
+# keep_arg <args...> -> the host helper's argument: seconds, or off. A usage
+# error before any AWS call for anything else (state.sh keep_seconds).
+keep_arg() {
+  (( $# == 1 )) || die "$EX_USAGE" 'keep takes one argument: a duration up to 12h (90m, 3h) or off' "try: $SELF help"
+  [[ $1 != off ]] || { echo off; return 0; }
+  keep_seconds "$1" || die "$EX_USAGE" "keep: '$1' is not a duration from 1m to 12h" \
+    "e.g. $SELF keep 90m, $SELF keep 3h, or $SELF keep off"
 }
 
 # --- stop --------------------------------------------------------------------
@@ -778,7 +830,7 @@ main() {
     destroy)         cmd_destroy "$@" ;;
     ssh)             cmd_ssh "$@" ;;
     console)         cmd_console "$@" ;;
-    keep)            not_yet U4 "$cmd" ;;
+    keep)            cmd_keep "$@" ;;
     runbook)         not_yet U5 "$cmd" ;;
     *)               die "$EX_USAGE" "unknown command: $cmd" "try: $SELF help" ;;
   esac

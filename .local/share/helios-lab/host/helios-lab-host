@@ -7,9 +7,14 @@
 #
 # Installed layout (`install` places what the push carries):
 #   /usr/local/libexec/helios-lab/helios-lab-host   this helper, 0755
-#   /etc/systemd/system/helios-lab-*.service        units from host/, 0644
+#   /etc/systemd/system/helios-lab-*.{service,timer} units from host/, 0644
 #   /etc/helios-lab/host.conf                       the Mac's settings, 0644
 #   /etc/helios-lab/engvm-lab.sh                    the guest's sizing, 0644
+#   /etc/ssh/sshd_config.d/10-helios-lab.conf       sshd-helios-lab.conf, 0644
+# Written by the idle check and keep (U4):
+#   /run/helios-lab/idle                the last idle check's record (tmpfs:
+#                                       the count starts again on every boot)
+#   /var/lib/helios-lab/inhibit-until   keep's deadline (disk: see cmd_keep)
 # Written by provisioning:
 #   /var/lib/helios-lab/stage.<stage>   marker: the input the stage was built from
 #   /var/lib/helios-lab/progress        the current run's progress (protocol below)
@@ -23,7 +28,9 @@
 #   /var/lib/helios-lab/guest-verified  the guest marker (single-marker protocol)
 #
 # Subcommands:
-#   install <dir>    place the pushed files, reload systemd, print the epoch (root; the push)
+#   install <dir>    place the pushed files, reload systemd and sshd, arm the
+#                    idle timer, then disarm the dead-man timer, print the
+#                    epoch (root; the push)
 #   provision        run the stages under a lock (root; the unit's ExecStart)
 #   progress-reset   empty the progress file (root; the unit's ExecStartPre)
 #   progress         print the progress file and the unit's state (the Mac polls)
@@ -35,6 +42,10 @@
 #   guest-abandon    stop an unverified first boot's create unit, so the next
 #                    provision run recreates the guest (root; the Mac, when the
 #                    first boot never passed the smoke check)
+#   idle-check       one idle check: reset, count or power off (root;
+#                    helios-lab-idle.service's ExecStart, every 5 min)
+#   keep <s>|off     hold off the idle stop for <s> seconds (at most 12h), or
+#                    clear it; prints the deadline or "off" (root; helios-lab keep)
 # Start provisioning only through the unit (systemctl start
 # helios-lab-provision): it empties the progress file first, and a second run
 # can't start while one is active. The lock covers a run started by hand.
@@ -85,6 +96,20 @@ readonly PROVISION_LOCK=$ROOT_PREFIX/run/lock/helios-lab-provision.lock
 readonly SERVICE=helios-lab-provision.service
 readonly GUARD_SERVICE=helios-lab-guard.service
 readonly GUARD_RULES=/etc/helios-lab/guard.nft   # as the guard unit names it
+
+# The idle stop (U4). The dead-man timer comes from user-data (lib/render.sh)
+# and powers the host off 2h after each boot until install disarms it.
+readonly IDLE_TIMER=helios-lab-idle.timer
+readonly IDLE_SERVICE=helios-lab-idle.service
+readonly DEADMAN_TIMER=helios-lab-deadman.timer
+readonly IDLE_RECORD=$ROOT_PREFIX/run/helios-lab/idle
+readonly INHIBIT_FILE=$MARKER_DIR/inhibit-until
+readonly UPTIME_FILE=$ROOT_PREFIX/proc/uptime
+# sshd takes the first value it reads for a keyword, and reads its drop-ins
+# in name order, ahead of the rest of sshd_config: "10-" goes first.
+readonly SSHD_DROPIN=$ROOT_PREFIX/etc/ssh/sshd_config.d/10-helios-lab.conf
+readonly SSH_SERVICE=ssh.service                 # Ubuntu's name for sshd's unit
+readonly INPUT_TIMEOUT_S=10                      # each idle input, at most
 
 readonly STAGES='packages libvirt guard engvm seed guest'
 readonly LAB_USER=ubuntu
@@ -188,13 +213,13 @@ progress_line() {
 }
 
 # install_dest <pushed file name> -> "<path> <mode>"; fails for a name with
-# no rule, so a new host/ file can't land somewhere by accident (U3 and U4
-# add rules for theirs)
+# no rule, so a new host/ file can't land somewhere by accident
 install_dest() {
   case $1 in
     helios-lab-host)                         echo "$LIBEXEC_DIR/$1 0755" ;;
     helios-lab-*.service|helios-lab-*.timer) echo "$SYSTEMD_DIR/$1 0644" ;;
     host.conf|engvm-lab.sh)                  echo "$CONF_DIR/$1 0644" ;;
+    sshd-helios-lab.conf)                    echo "$SSHD_DROPIN 0644" ;;
     *)                                       return 1 ;;
   esac
 }
@@ -407,6 +432,168 @@ console_clean() {
     line=${line%"${line##*[![:space:]]}"}
     [[ -z $line ]] || printf '%s\n' "$line"
   done <<< "$1"
+}
+
+# --- Idle (pure) -------------------------------------------------------------
+# The rule (plan: "Idle auto-stop"): the host is idle when no session is
+# established on its :22 and no keep is in force. Guest ssh (ProxyJump) and
+# the console both end at the host's sshd, so the session count covers every
+# way in. An ACTIVE provision run also holds the host up, for at most
+# PROVISION_DEFER_S. There is no load input. Every IDLE_TICK_S one check
+# runs (helios-lab-idle.timer): busy resets the count, idle adds one, and
+# the check that makes the count reach the window's checks (IDLE_MINUTES / 5)
+# powers the host off.
+# Invariants (the decision table in tests/idle.test.sh checks each):
+# - fail closed: an input the check can't use never resets the count; it
+#   counts as idle, so a broken check ends in a stop, not in unbounded billing
+# - a failed or hung provision holds the host up for at most 2h: only an
+#   active run defers, and only while it is younger than PROVISION_DEFER_S
+# - absent sessions and keeps, the host always becomes stoppable: those two
+#   and the bounded provision clause are the only holds (idle_busy)
+# - a keep holds it for at most KEEP_MAX_S (plus one check's slack)
+# - the idle path only powers off: the instance's shutdown behaviour is stop
+#   (U6), so it stops the host but can never terminate it
+readonly IDLE_TICK_S=300           # helios-lab-idle.timer's OnUnitActiveSec
+readonly PROVISION_DEFER_S=7200
+readonly KEEP_MAX_S=43200          # keep's cap, 12h (the Mac checks it too)
+readonly KEEP_SLACK_S=300          # for a clock step after a keep was written
+readonly IDLE_FALLBACK_TICKS=12    # the default 60 min, when host.conf is unusable
+readonly NUM_RE='^(0|[1-9][0-9]{0,11})$'   # a plain count or epoch: no sign, no leading 0
+
+# inhibit_state <now|?> <inhibit-until text|none> -> <deadline> | none | invalid
+# The keep in force: its deadline while it lies ahead; none when there is no
+# keep or it has passed. Anything else is invalid, a deadline beyond the cap
+# included: a hand-edited or clock-skewed keep is never trusted to hold the
+# host up. The idle check and status both judge a keep only through here.
+inhibit_state() {
+  [[ $2 != none ]] || { echo none; return 0; }
+  [[ $1 =~ $NUM_RE && $2 =~ $NUM_RE ]] || { echo invalid; return 0; }
+  if (( $2 > $1 + KEEP_MAX_S + KEEP_SLACK_S )); then echo invalid
+  elif (( $2 > $1 )); then echo "$2"
+  else echo none
+  fi
+}
+
+# provision_defers <ActiveState> <active seconds> -> 0 while an active run is
+# younger than PROVISION_DEFER_S. Only "active" (Type=exec: exactly while
+# stages run); a failed, finished or never-started run defers nothing.
+provision_defers() { [[ $1 == active ]] && (( $2 < PROVISION_DEFER_S )); }
+
+# The decision's inputs, in this order; "?" is an input the check could not
+# read, and <active seconds> is "-" when the provision unit is not active:
+#   <provision ActiveState> <active seconds> <now> <inhibit-until|none>
+#   <sessions on :22> <count: idle checks so far> <required: IDLE_MINUTES / 5>
+
+# idle_problems <inputs...> -> the inputs it cannot use, comma-separated;
+# nothing when every one is usable
+idle_problems() {
+  local -a bad=()
+  [[ $1 =~ ^[a-z][a-z-]*$ ]] || bad+=('the provision unit')
+  [[ $1 != active || $2 =~ $NUM_RE ]] || bad+=("the provision run's age")
+  [[ $3 =~ $NUM_RE ]] || bad+=('the clock')
+  [[ $(inhibit_state "$3" "$4") != invalid ]] || bad+=('the keep deadline')
+  [[ $5 =~ $NUM_RE ]] || bad+=('the ssh sessions')
+  [[ $6 =~ $NUM_RE ]] || bad+=('the idle count')
+  [[ $7 =~ ^[1-9][0-9]{0,3}$ ]] || bad+=('the idle window')
+  (( ${#bad[@]} == 0 )) || join_comma "${bad[@]}"
+}
+
+join_comma() {
+  local out=$1
+  shift
+  while (( $# > 0 )); do out="$out, $1"; shift; done
+  printf '%s\n' "$out"
+}
+
+# idle_decision <inputs...> -> reset | increment | poweroff
+# Busy resets, but only when every input is usable (fail closed). Otherwise
+# this check makes the count count + 1, and powers off once that reaches
+# required: with required 12, the check after 11 idle ones powers off.
+idle_decision() {
+  if [[ -z $(idle_problems "$@") ]] && idle_busy "$@"; then echo reset; return 0; fi
+  if (( $(idle_count_of "$6") + 1 >= $(idle_required_of "$7") )); then echo poweroff; else echo increment; fi
+}
+
+# idle_busy <inputs, all usable...> -> 0 when something holds the host up
+idle_busy() {
+  provision_defers "$1" "$2" || [[ $(inhibit_state "$3" "$4") =~ $NUM_RE ]] || (( $5 > 0 ))
+}
+
+# idle_count_of <count|?> / idle_required_of <required|?> -> the value the
+# decision uses: an unusable count starts again at 0, an unusable window is
+# the default one
+idle_count_of() { if [[ $1 =~ $NUM_RE ]]; then echo "$1"; else echo 0; fi; }
+idle_required_of() { if [[ $1 =~ ^[1-9][0-9]{0,3}$ ]]; then echo "$1"; else echo "$IDLE_FALLBACK_TICKS"; fi; }
+
+# idle_next_count <decision> <count|?> -> the count this check leaves
+idle_next_count() {
+  case $1 in
+    reset) echo 0 ;;
+    *)     echo $(( $(idle_count_of "$2") + 1 )) ;;
+  esac
+}
+
+# idle_escalate <decision> <recorded: yes|no> -> the decision to act on. A
+# count that could not be recorded can't reach the window, so an idle check
+# that can't record powers off now (fail closed); a reset stays a reset.
+idle_escalate() {
+  if [[ $1 == reset || $2 == yes ]]; then echo "$1"; else echo poweroff; fi
+}
+
+# idle_record <now|?> <decision> <count> <required> [problem] -> the line the
+# check leaves in /run/helios-lab/idle, which status reports and the next
+# check reads its count from:
+#   <epoch> <reset|increment|poweroff> <count> <required> [<problem>]
+idle_record() { printf '%s %s %s %s%s\n' "$1" "$2" "$3" "$4" "${5:+ $5}"; }
+
+# idle_record_count <record|none|?> -> its count: 0 for none (a fresh boot),
+# ? for a record it can't read
+idle_record_count() {
+  local epoch decision count rest
+  [[ $1 != none ]] || { echo 0; return 0; }
+  read -r epoch decision count rest <<< "$1"
+  if [[ $count =~ $NUM_RE ]]; then echo "$count"; else echo '?'; fi
+}
+
+# idle_required <host.conf text> -> the window in checks, IDLE_MINUTES / 5, or ?
+idle_required() {
+  local minutes
+  if minutes=$(conf_get "$1" IDLE_MINUTES) && idle_ok "$minutes"; then
+    echo $(( minutes * 60 / IDLE_TICK_S ))
+  else
+    echo '?'
+  fi
+}
+
+# active_seconds <ActiveEnterTimestampMonotonic, µs> <`/proc/uptime` text>
+# -> how long the provision run has been active; fails when either is
+# unreadable. systemd's stamp is CLOCK_MONOTONIC and uptime CLOCK_BOOTTIME,
+# which runs ahead only while the machine is suspended: never on EC2 without
+# hibernation, and any difference makes a run look older, never younger,
+# so it can only end the deferral sooner (fail closed). A wall-clock step
+# can't move either.
+active_seconds() {
+  local up=${2%% *}
+  up=${up%%.*}
+  [[ $1 =~ ^[1-9][0-9]{0,15}$ && $up =~ $NUM_RE ]] || return 1
+  (( up >= $1 / 1000000 )) || return 1
+  echo $(( up - $1 / 1000000 ))
+}
+
+# count_lines <text> -> its non-empty lines
+count_lines() {
+  local n=0 line
+  while IFS= read -r line; do [[ -z $line ]] || n=$(( n + 1 )); done <<< "$1"
+  echo "$n"
+}
+
+# keep_until <now> <seconds> -> the keep's deadline, now + seconds; fails
+# outside 1..KEEP_MAX_S. The deadline is taken on the host's clock, the one
+# the idle check compares it with, and the cap is enforced here as well as
+# on the Mac: no keep can hold the host up for longer.
+keep_until() {
+  [[ $1 =~ $NUM_RE && $2 =~ ^[1-9][0-9]{0,4}$ ]] && (( $2 <= KEEP_MAX_S )) || return 1
+  echo $(( $1 + $2 ))
 }
 
 # =============================================================================
@@ -750,8 +937,11 @@ transcript_lines() {
 
 # --- install, progress, journal ----------------------------------------------
 # cmd_install <dir> — the push's last step, as root: each pushed file to its
-# place (install_dest), atomically, then a systemd reload. The directory goes
-# afterwards; only one named like the push's own is ever removed.
+# place (install_dest), atomically, then a systemd reload, sshd's drop-in
+# applied, and the stop handed from the dead-man timer to the idle timer.
+# The directory goes afterwards; only one named like the push's own is ever
+# removed. Any failure dies before the handoff completes, so up fails loudly
+# and whatever stop was armed stays armed.
 cmd_install() {
   local stage=${1:-} f spec dest mode
   require_root install
@@ -763,14 +953,47 @@ cmd_install() {
     write_file "$dest" "$(<"$f")" "$mode" || die "cannot install $dest"
   done
   systemctl daemon-reload || die 'systemctl daemon-reload failed'
-  # --- Extension point (U4) ---
-  # Enable the idle timer, then, only if that succeeded, disarm the dead-man
-  # timer. Until U4 lands, nothing here touches helios-lab-deadman.timer, so
-  # the dead-man timer stays armed.
+  sshd_apply
+  idle_arm
   rm -rf "$stage"
   # The install's epoch, on the host's clock: up re-runs a provision that
   # was already active and so began before this push (lib/remote.sh).
   date +%s
+}
+
+# sshd_apply — the drop-in reaches new sessions once sshd re-reads its
+# config. sshd -t first, as ssh.service itself does before every start: a
+# drop-in sshd rejects is removed again, because left in place it would keep
+# sshd from starting at the next boot and lock the lab out. Then
+# try-reload-or-restart ssh.service: on Ubuntu 24.04 ssh.socket only holds
+# the listening socket (generated from Port/ListenAddress, which this drop-in
+# leaves alone), and ClientAlive* are settings of the sshd that ssh.service
+# runs, so a reload (its ExecReload: sshd -t, then SIGHUP) is what applies
+# them. A reload keeps established sessions, the push's own included. When
+# ssh.service is not running (socket activation, no client yet) there is
+# nothing to reload: the next connection starts sshd with the drop-in.
+sshd_apply() {
+  local out
+  if ! out=$(sshd -t 2>&1); then
+    rm -f "$SSHD_DROPIN"
+    die "sshd -t rejects the ssh config, so ${SSHD_DROPIN#"$ROOT_PREFIX"} was removed again and the stop was not handed over: ${out%%$'\n'*}"
+  fi
+  systemctl try-reload-or-restart "$SSH_SERVICE" || die "cannot reload $SSH_SERVICE for its drop-in"
+}
+
+# idle_arm — the handoff (R5). Invariant: from launch onward every boot has a
+# stop armed. The idle timer is enabled (for every boot from now on) and
+# started first; only once it is active is the dead-man timer disabled and
+# stopped, and only if user-data installed one. If arming fails, install
+# dies and the dead-man timer stays armed; if disarming fails, both are
+# armed (the host still stops 2h after boot) and install dies, so up says so.
+idle_arm() {
+  if ! systemctl enable --now "$IDLE_TIMER" || ! systemctl is-active --quiet "$IDLE_TIMER"; then
+    die "cannot arm $IDLE_TIMER: the dead-man timer stays armed, so the host still stops 2h after boot"
+  fi
+  [[ -f $SYSTEMD_DIR/$DEADMAN_TIMER ]] || return 0
+  systemctl disable --now "$DEADMAN_TIMER" \
+    || die "$IDLE_TIMER is armed, but $DEADMAN_TIMER could not be disarmed: it still stops the host 2h after boot"
 }
 
 cmd_progress_reset() {
@@ -795,7 +1018,14 @@ unit_property() {
 }
 
 # cmd_status — read-only (the Mac's status relies on it): the progress, then
-# one "<key> <value>" line per guest fact, parsed by lib/remote.sh:
+# one "<key> <value>" line per idle fact (U4) and per guest fact, parsed by
+# lib/remote.sh:
+#   idle <ActiveState> <Result>             helios-lab-idle.timer's state (active:
+#                                           armed), and the idle check's last run
+#                                           as systemd saw it
+#   idle-run <record> | idle-run none       the last check's record (idle_record)
+#   inhibit <deadline> | none | invalid     a keep, as the idle check judges it now
+#   deadman <ActiveState>                   the user-data dead-man timer
 #   verified no | verified <pin> <sizing>   guest-verified's record
 #   pushed <pin> <sizing> | pushed unknown  what host.conf and engvm-lab.sh say now
 #   domain <virsh domstate> | absent | unknown
@@ -809,6 +1039,7 @@ unit_property() {
 cmd_status() {
   local domain lease verified=no line
   cmd_progress
+  idle_facts
   [[ ! -f $GUEST_VERIFIED ]] || verified=$(record_line "$(cat "$GUEST_VERIFIED")")
   echo "verified $verified"
   echo "pushed $(pushed_line)"
@@ -822,6 +1053,16 @@ cmd_status() {
   while IFS= read -r line; do
     [[ -z $line ]] || printf 'console %s\n' "$line"
   done <<< "$(transcript_lines "$TRANSCRIPT_LINES")"
+}
+
+# idle_facts — status's idle lines (cmd_status), from reads only
+idle_facts() {
+  local now
+  now=$(date +%s 2>/dev/null) || now='?'
+  echo "idle $(unit_property ActiveState "$IDLE_TIMER") $(unit_property Result "$IDLE_SERVICE")"
+  echo "idle-run $(idle_record_read)"
+  echo "inhibit $(inhibit_state "$now" "$(inhibit_read)")"
+  echo "deadman $(unit_property ActiveState "$DEADMAN_TIMER")"
 }
 
 # record_line <record text> -> "<pin> <sizing>"
@@ -898,6 +1139,116 @@ run_epoch() {
   [[ ! $epoch =~ ^[0-9]+$ ]] || echo "$epoch"
 }
 
+# --- Idle check and keep -----------------------------------------------------
+# cmd_idle_check — helios-lab-idle.service's ExecStart, every 5 min: gather
+# the inputs, decide (idle_decision, pure), record the count, act. Fail
+# closed: nothing here may end the run before it acts, so errexit is off,
+# every input is bounded in time and passed on as "?" when it can't be read,
+# and an unreadable input counts as idle. Exits 1 when an input, the record
+# or the poweroff failed: systemd marks the run failed, and status (with
+# the record's problem) shows it above the state line.
+cmd_idle_check() {
+  require_root idle-check
+  set +e
+  local state active now inhibit sessions count required problems decision
+  read -r state active now inhibit sessions count required <<< "$(idle_inputs)"
+  problems=$(idle_problems "$state" "$active" "$now" "$inhibit" "$sessions" "$count" "$required")
+  decision=$(idle_decision "$state" "$active" "$now" "$inhibit" "$sessions" "$count" "$required")
+  echo "idle-check: provision $state (age $active), keep $inhibit, sessions $sessions, count $count of $required: $decision${problems:+ (could not use $problems)}"
+  idle_conclude "$now" "$decision" "$(idle_next_count "$decision" "$count")" \
+    "$(idle_required_of "$required")" "${problems:+could not use $problems}"
+}
+
+# idle_inputs -> the seven inputs on one line (idle_problems' order), each a
+# single word, "?" for one that could not be read
+idle_inputs() {
+  local show state
+  show=$(bounded systemctl show -p ActiveState -p ActiveEnterTimestampMonotonic "$SERVICE" 2>/dev/null) || show=''
+  state=$(conf_get "$show" ActiveState) || state=''
+  echo "${state:-?} $(provision_age "${state:-?}" "$show") $(date +%s 2>/dev/null || echo '?')" \
+    "$(inhibit_read) $(session_count) $(idle_record_count "$(idle_record_read)")" \
+    "$(idle_required "$(cat "$CONF_FILE" 2>/dev/null || true)")"
+}
+
+bounded() { timeout "$INPUT_TIMEOUT_S" "$@"; }
+
+# provision_age <ActiveState> <systemctl show text> -> the run's age in
+# seconds, - when it is not active, ? when unreadable
+provision_age() {
+  local enter uptime
+  [[ $1 == active ]] || { echo -; return 0; }
+  enter=$(conf_get "$2" ActiveEnterTimestampMonotonic) || enter=''
+  uptime=$(cat "$UPTIME_FILE" 2>/dev/null) || uptime=''
+  active_seconds "$enter" "$uptime" || echo '?'
+}
+
+# session_count -> established tcp sessions whose local port is 22 (sshd's
+# side, IPv4 and IPv6), or ?
+session_count() {
+  local out
+  out=$(bounded ss -Htn state established '( sport = :22 )' 2>/dev/null) || { echo '?'; return 0; }
+  count_lines "$out"
+}
+
+# inhibit_read -> keep's deadline as written, none without a keep, ? when unreadable
+inhibit_read() {
+  local v
+  [[ -e $INHIBIT_FILE ]] || { echo none; return 0; }
+  v=$(cat "$INHIBIT_FILE" 2>/dev/null) || v=''
+  [[ -n $v && $v != *[[:space:]]* ]] || v='?'
+  echo "$v"
+}
+
+# idle_record_read -> the last check's record (its first line), none on a
+# fresh boot, ? when unreadable
+idle_record_read() {
+  local line=''
+  [[ -e $IDLE_RECORD ]] || { echo none; return 0; }
+  { IFS= read -r line < "$IDLE_RECORD"; } 2>/dev/null || true
+  echo "${line:-?}"
+}
+
+# idle_conclude <now> <decision> <next count> <required used> <problem|""> —
+# record, then act; returns 1 when anything failed. The record is written
+# first: a count it cannot keep escalates an idle check to a poweroff.
+idle_conclude() {
+  local decision=$2 problem=$5 recorded=yes
+  write_file "$IDLE_RECORD" "$(idle_record "$1" "$2" "$3" "$4" "$problem")" 0644 2>/dev/null || recorded=no
+  decision=$(idle_escalate "$decision" "$recorded")
+  [[ $recorded == yes ]] || problem=${problem:+$problem; }"could not record the idle count, so this check powers off"
+  [[ -z $problem ]] || echo "idle-check: $problem" >&2
+  if [[ $decision == poweroff ]] && ! idle_poweroff; then
+    problem=${problem:+$problem; }'systemctl poweroff failed'
+    write_file "$IDLE_RECORD" "$(idle_record "$1" "$decision" "$3" "$4" "$problem")" 0644 2>/dev/null
+  fi
+  [[ -z $problem ]]
+}
+
+# idle_poweroff — a clean poweroff: libvirt-guests shuts the guest down first
+# (ON_SHUTDOWN=shutdown; Helios honours ACPI in about 20 s, U7), then the
+# host goes down. Its shutdown behaviour is stop (U6), so EC2 stops the
+# instance and keeps its disk. Invariant: the idle path only ever stops.
+idle_poweroff() {
+  echo 'idle-check: idle for the whole window: powering off (EC2 stops the instance)'
+  systemctl poweroff
+}
+
+# cmd_keep <seconds>|off — keep's deadline, on the host's clock, at most
+# KEEP_MAX_S ahead; prints it, or "off". It lives on disk, so it survives a
+# stop and start: a keep is a deadline on the wall clock, inert once passed
+# (the idle check then counts as usual), and `helios-lab keep off` clears it.
+cmd_keep() {
+  local until
+  require_root keep
+  case ${1:-} in
+    off) rm -f "$INHIBIT_FILE" || die "cannot remove $INHIBIT_FILE"
+         echo off ;;
+    *)   until=$(keep_until "$(date +%s)" "${1:-}") || die "usage: $HOST_SELF keep <seconds, 1 to $KEEP_MAX_S> | off"
+         write_file "$INHIBIT_FILE" "$until" 0644 || die "cannot write $INHIBIT_FILE"
+         echo "$until" ;;
+  esac
+}
+
 require_root() { (( EUID == 0 )) || die "$1 must run as root"; }
 
 main() {
@@ -911,7 +1262,9 @@ main() {
     status)         cmd_status ;;
     guest-verified) cmd_guest_verified ;;
     guest-abandon)  cmd_guest_abandon ;;
-    *)              die "usage: $HOST_SELF install <dir> | provision | progress-reset | progress | journal [<lines>|all] | status | guest-verified | guest-abandon" ;;
+    idle-check)     cmd_idle_check ;;
+    keep)           cmd_keep "${2:-}" ;;
+    *)              die "usage: $HOST_SELF install <dir> | provision | progress-reset | progress | journal [<lines>|all] | status | guest-verified | guest-abandon | idle-check | keep <seconds>|off" ;;
   esac
 }
 

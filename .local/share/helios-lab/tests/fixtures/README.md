@@ -105,3 +105,10 @@ they print only IDs. The tests build these inline and mark each one:
   a `BEGIN` probe that exits, the end of the first-boot console transcript
   (`INFO ok, run complete`, `Hostname: helios`), and `virsh domstate` lines.
   The guest's DHCP address is in libvirt's default `192.168.122.0/24`.
+- the idle stop (U4): the idle lines of a `helios-lab-host status` reply
+  (`../lib.sh` `idle_status_reply`), checked against the helper's own
+  `idle_facts` the same way in `idle.test.sh`; `helios-lab-host keep`'s
+  answer (a deadline epoch, or `off`); and, for the idle check run on the
+  Mac against faked tools, the lines `ss -Htn state established` prints for
+  sessions on :22, `systemctl show`'s `KEY=value` lines and `/proc/uptime`.
+  Their epochs are relative to the test's clock or the fixed `NOW`.

@@ -1,0 +1,20 @@
+# helios-lab-idle.timer — runs helios-lab-idle.service every 5 min. install
+# (helios-lab-host) enables and starts it on every push, and only once it is
+# active disarms the user-data dead-man timer: from launch onward every boot
+# has a stop armed. Enabled, it starts with every later boot.
+[Unit]
+Description=helios-lab idle check, every 5 min
+
+[Timer]
+# The first check 5 min after boot (the count in /run starts at 0 on every
+# boot), then 5 min after each one. A timer first started on a host that has
+# been up longer, as on the first push, checks at once: the push's own ssh
+# session makes that a reset. The Mac's countdown assumes this period
+# (lib/state.sh IDLE_TICK_S).
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=helios-lab-idle.service
+
+[Install]
+WantedBy=timers.target

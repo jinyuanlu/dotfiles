@@ -19,6 +19,7 @@
 #   /usr/local/libexec/helios-lab/helios-lab-host progress  ssh-host-progress
 #   sudo /usr/local/.../helios-lab-host journal 20          ssh-host-journal
 #   sudo /usr/local/.../helios-lab-host status              ssh-host-status
+#   sudo /usr/local/.../helios-lab-host keep 10800          ssh-host-keep (U4)
 #   uname -o                                                ssh-guest-uname
 #   pfexec dtrace -n '...'                                  ssh-guest-dtrace
 #   (none: helios-lab ssh)                                  ssh-guest-login

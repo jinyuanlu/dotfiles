@@ -248,9 +248,41 @@ progress_until() {
   printf '%s\n' "$(( t + 364 )) guest start" "$(( t + 429 )) guest done created · first boot under way"
 }
 
-# guest_status_reply <kind> [progress kind] -> a `helios-lab-host status`
-# reply: the progress (progress_reply, 'done' by default), then the guest
-# lines. Hand-written in the grammar host/helios-lab-host cmd_status writes
+# idle_status_reply [kind] -> the idle lines of a `helios-lab-host status`
+# reply (U4). Hand-written in the grammar host/helios-lab-host idle_facts
+# writes (idle.test.sh checks the helper writes exactly this). Epochs are
+# relative to now, because status counts down from the real clock. Kinds:
+#   armed      the idle timer armed, its last check found the host busy (default)
+#   counting   3 idle checks of 12 so far, the last a minute ago
+#   inhibited  a keep in force for 3 more hours
+#   failed     the last check could not read the ssh sessions (so it counted as idle)
+#   crashed    systemd says the last check failed; its record is an older, clean one
+#   unarmed    the idle timer not armed, the dead-man timer still armed
+#   bare       neither timer armed
+#   both       both timers armed
+#   legacy     nothing at all: a helper older than U4
+idle_status_reply() {
+  local now idle='active success' run deadman=inactive inhibit=none
+  now=$(date +%s)
+  run="$(( now - 60 )) reset 0 12"
+  case ${1:-armed} in
+    armed)     ;;
+    counting)  run="$(( now - 60 )) increment 3 12" ;;
+    inhibited) inhibit=$(( now + 10800 )) ;;
+    failed)    idle='active exit-code' run="$(( now - 60 )) increment 4 12 could not use the ssh sessions" ;;
+    crashed)   idle='active exit-code' ;;
+    unarmed)   idle='inactive success' deadman=active run=none ;;
+    bare)      idle='inactive success' run=none ;;
+    both)      deadman=active ;;
+    legacy)    return 0 ;;
+  esac
+  printf '%s\n' "idle $idle" "idle-run $run" "inhibit $inhibit" "deadman $deadman"
+}
+
+# guest_status_reply <kind> [progress kind] [idle kind] -> a `helios-lab-host
+# status` reply: the progress (progress_reply, 'done' by default), the idle
+# lines (idle_status_reply, 'armed' by default), then the guest lines.
+# Hand-written in the grammar host/helios-lab-host cmd_status writes
 # (guest.test.sh checks the helper writes exactly this); the console lines
 # are the end of the spike's first-boot transcript. Kinds:
 #   first-boot        unverified, its create unit running, answering on tcp/22
@@ -275,6 +307,7 @@ guest_status_reply() {
     shut-off)         domain='shut off' create=inactive lease=none sshd=closed ;;
   esac
   progress_reply "${2:-done}"
+  idle_status_reply "${3:-armed}"
   printf '%s\n' "verified $verified" "pushed $pushed" "domain $domain" "create $create" "lease $lease" "sshd $sshd"
   [[ -n $console ]] || return 0
   while IFS= read -r line; do echo "console $line"; done <<< "$console"

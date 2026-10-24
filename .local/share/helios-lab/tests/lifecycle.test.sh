@@ -342,12 +342,9 @@ test_unknown_command_and_status_arguments_are_usage_errors() {
 }
 
 test_unimplemented_commands_exit_1_naming_their_unit() {
-  local pair
-  for pair in keep:U4 runbook:U5; do
-    run_cli "${pair%%:*}"
-    assert_rc 1
-    assert_contains "$ERR" "${pair%%:*}: not implemented yet (${pair#*:})"
-  done
+  run_cli runbook   # keep arrived with U4 (idle.test.sh)
+  assert_rc 1
+  assert_contains "$ERR" 'runbook: not implemented yet (U5)'
   assert_eq '' "$(calls)"
 }
 

@@ -4,7 +4,8 @@
 # verification against the console, the per-command ssh fragment, the push
 # of host/ and its config, and following the provision unit. U3: the guest's
 # smoke check and bring-up at the end of up, the read-only probe status
-# runs, and the ssh calls behind `ssh` and `console`.
+# runs, and the ssh calls behind `ssh` and `console`. U4: the idle facts in
+# the probe's reply, and the call behind `keep`.
 #
 # Pure parsers come first, each marked (pure), as aws.sh keeps its error
 # parsers: the console's fingerprint blocks, the host-key verdict, ssh's
@@ -25,7 +26,8 @@
 # RETRY_SECONDS, IDLE_MINUTES, ENGVM_PIN, HELIOS_LAB_HOME, state_dir_ensure,
 # die, warn, EX_*; aws.sh: aws_console_output, first_line, REGION, US;
 # state.sh: fmt_elapsed, fmt_duration, join_dot, count_rows, fingerprint_of,
-# anomaly; render.sh: the renderers and ED25519_PUB_RE.
+# anomaly, local_hhmm, the auto-stop phrases and IDLE_CHECK_S; render.sh: the
+# renderers and ED25519_PUB_RE.
 
 readonly HOST_HELPER=/usr/local/libexec/helios-lab/helios-lab-host
 readonly PROVISION_UNIT=helios-lab-provision.service
@@ -285,9 +287,10 @@ lines_after() {
 
 # --- Host status reply (pure) ------------------------------------------------
 # Keep in step with host/helios-lab-host cmd_status, which writes it: the
-# progress protocol above, then one "<key> <value>" line per guest fact
-# (verified, pushed, domain, create, lease, sshd, then console lines). The
-# progress parsers skip the guest lines (no epoch), these skip the rest.
+# progress protocol above, then one "<key> <value>" line per idle fact (U4:
+# idle, idle-run, inhibit, deadman) and per guest fact (verified, pushed,
+# domain, create, lease, sshd, then console lines). The progress parsers
+# skip these lines (no epoch), these skip the rest.
 
 # status_value <reply> <key> -> the value of its first <key> line; fails when there is none
 status_value() {
@@ -421,6 +424,110 @@ provision_detail() {
     running) echo "running${stage:+: $stage}" ;;
     failed)  echo "failed at $stage: $reason" ;;
     *)       echo 'has not run yet: helios-lab up starts it' ;;
+  esac
+}
+
+# --- Idle facts in the status reply (pure, U4) -------------------------------
+# Keep in step with host/helios-lab-host idle_facts:
+#   idle <timer ActiveState> <the idle check's last Result>
+#   idle-run <epoch> <reset|increment|poweroff> <count> <required> [<problem>] | idle-run none
+#   inhibit <deadline> | inhibit none | inhibit invalid   (the host's own judgement)
+#   deadman <ActiveState>
+# A helper older than U4 prints none of them: status then falls back to the
+# configured window, as for a host it can't probe.
+
+# stops_armed <reply> -> idle | deadman | both | none; fails when the reply
+# has no idle facts. A timer is armed only when it is active.
+stops_armed() {
+  local idle timer rest deadman
+  idle=$(status_value "$1" idle) || return 1
+  read -r timer rest <<< "$idle"
+  deadman=$(status_value "$1" deadman) || deadman=unknown
+  case $timer:$deadman in
+    active:active) echo both ;;
+    active:*)      echo idle ;;
+    *:active)      echo deadman ;;
+    *)             echo none ;;
+  esac
+}
+
+# idle_run_of <reply> -> "epoch<US>decision<US>count<US>required<US>problem"
+# of the last check; fails when there is none, or it can't be read
+idle_run_of() {
+  local v epoch decision count required problem
+  v=$(status_value "$1" idle-run) || return 1
+  read -r epoch decision count required problem <<< "$v"
+  [[ $epoch =~ ^[1-9][0-9]{0,11}$ && $count =~ ^(0|[1-9][0-9]{0,5})$ && $required =~ ^[1-9][0-9]{0,3}$ ]] || return 1
+  case $decision in reset|increment|poweroff) ;; *) return 1 ;; esac
+  printf '%s\n' "$epoch$US$decision$US$count$US$required$US$problem"
+}
+
+# idle_problem_of <reply> -> the last check's problem, or nothing (its record
+# may lack a usable epoch and still carry one)
+idle_problem_of() {
+  local v epoch decision count required problem=''
+  v=$(status_value "$1" idle-run) || return 0
+  read -r epoch decision count required problem <<< "$v"
+  printf '%s' "$problem"
+}
+
+# inhibit_of <reply> -> the keep's deadline while one is in force, else none
+inhibit_of() {
+  local v
+  v=$(status_value "$1" inhibit) || v=none
+  if [[ $v =~ ^[1-9][0-9]{0,11}$ ]]; then echo "$v"; else echo none; fi
+}
+
+# idle_field <reply> <now> <fallback idle-minutes> -> the headline's
+# auto-stop field while the idle timer is armed: a keep's deadline, the
+# countdown once idle checks are counting, else the window (in the host's
+# last check's terms: what its next check will use)
+idle_field() {
+  local run epoch decision count required problem keep
+  keep=$(inhibit_of "$1")
+  [[ $keep == none ]] || { inhibited_field "$keep"; return 0; }
+  run=$(idle_run_of "$1") || { autostop_field "$3"; return 0; }
+  # Not inline in the read's here-string: bash 3.2 would run the parser
+  # with read's IFS=US in effect.
+  IFS=$US read -r epoch decision count required problem <<< "$run"
+  case $decision in
+    poweroff) echo 'stopping itself (idle)' ;;
+    *) if (( count > 0 )); then autostop_in "$(idle_minutes_left "$2" "$epoch" "$count" "$required")"
+       else autostop_field $(( required * IDLE_CHECK_S / 60 ))
+       fi ;;
+  esac
+}
+
+# idle_anomalies <reply> <dead-man epoch> -> its "! " lines: a stop that is
+# not armed (or a dead-man timer still armed), and a failed last check
+idle_anomalies() {
+  local armed idle timer result problem deadman
+  armed=$(stops_armed "$1") || return 0
+  idle=$(status_value "$1" idle)
+  read -r timer result <<< "$idle"
+  deadman=$(status_value "$1" deadman) || deadman=unknown
+  case $armed in
+    none)    anomaly stop-unarmed "$timer" "$deadman" ;;
+    deadman) anomaly idle-unarmed "$timer" "$(local_hhmm "$2")" ;;
+    both)    anomaly deadman-armed "$(local_hhmm "$2")" ;;
+  esac
+  problem=$(idle_problem_of "$1")
+  if [[ -n $problem ]]; then anomaly idle-error "$problem"
+  elif [[ -n $result && $result != success ]]; then anomaly idle-crashed "$result"
+  fi
+}
+
+# idle_detail <reply> -> status's idle detail: when the last check ran and what it found
+idle_detail() {
+  local run epoch decision count required problem at
+  status_value "$1" idle >/dev/null || { echo "not reported: the host's helper predates the idle check; helios-lab up pushes the current one"; return 0; }
+  run=$(idle_run_of "$1") || { echo "no check yet this boot (one runs every $(( IDLE_CHECK_S / 60 )) min)"; return 0; }
+  IFS=$US read -r epoch decision count required problem <<< "$run"
+  at="last check $(local_hhmm "$epoch")"
+  case $decision in
+    reset)     echo "$at: busy (an ssh session, provisioning or a keep)" ;;
+    increment) echo "$at: idle, $count of $required checks" ;;
+    poweroff)  echo "$at: idle for all $required checks: powering off" ;;
   esac
 }
 
@@ -645,8 +752,10 @@ readonly PUSH_COMMAND="sudo bash -c 'stage=\$(mktemp -d /tmp/helios-lab-push.XXX
 
 # host_push -> the install's epoch (host clock). Every up copies host/ and
 # the rendered host config and installs them, so a fix in this repo reaches
-# an existing host (R13). Until U4 lands, nothing in the push touches the
-# dead-man timer: it stays armed.
+# an existing host (R13). The install also hands the stop over (U4): it arms
+# the idle timer, with the pushed idle window, and only then disarms the
+# dead-man timer; when either step fails it dies, so this does too, and the
+# stop that was armed stays armed.
 host_push() {
   local bundle out
   bundle=$(push_bundle) || die "$EX_FAIL" "cannot bundle $HELIOS_LAB_HOME/host for the push" \
@@ -759,20 +868,20 @@ provision_journal_print() {
 }
 
 # --- Guest -------------------------------------------------------------------
-# guest_bringup <instance-id> — the end of up (U3), once provisioning has the
-# guest's domain running: the smoke check through the guest alias (R8),
-# polled within the first-boot or the restart budget. An unverified guest
-# has new host keys (every create makes them), so the alias's old pin goes
-# first; a verified guest keeps its pin. Invariant: guest-verified is
-# written only after both checks passed, and only through the host helper.
+# guest_bringup <instance-id> <status reply> — the end of up (U3), once
+# provisioning has the guest's domain running, from a `status` reply taken
+# then: the smoke check through the guest alias (R8), polled within the
+# first-boot or the restart budget. An unverified guest has new host keys
+# (every create makes them), so the alias's old pin goes first; a verified
+# guest keeps its pin. Invariant: guest-verified is written only after both
+# checks passed, and only through the host helper.
 guest_bringup() {
-  local reply verified note
-  reply=$(host_status) || return
-  verified=$(guest_verified_of "$reply")
-  note=$(guest_mismatch "$reply")
+  local verified note
+  verified=$(guest_verified_of "$2")
+  note=$(guest_mismatch "$2")
   [[ -z $note ]] || warn "$note"
   [[ $verified == yes ]] || guest_key_forget "$1"
-  guest_wait "$verified" "$reply"
+  guest_wait "$verified" "$2"
   [[ $verified == yes ]] || guest_mark_verified
 }
 
@@ -878,6 +987,25 @@ guest_mark_verified() {
   echo 'guest · verified · its console is free · it starts with the host from now on'
 }
 
+# --- keep --------------------------------------------------------------------
+# keep_set <seconds|off> -> the host's answer: the keep's deadline, taken on
+# the host's clock (which the idle check compares it with), or "off". The
+# host enforces the 12h cap itself; a helper older than U4 has no keep.
+keep_set() {
+  local out rc=0
+  out=$(remote_attempt host "sudo $HOST_HELPER keep $1" < /dev/null) || rc=$?
+  (( rc == 0 )) || keep_failed "$rc" "$out"
+  printf '%s\n' "$out"
+}
+
+# keep_failed <exit status> <stderr> — dies: ssh's own failures by class,
+# the helper's with a hint
+keep_failed() {
+  (( $1 != 255 )) || ssh_fail host "$2"
+  die "$EX_FAIL" "setting the keep failed on the host (exit $1)" "the host said: $(first_line "$2")" \
+    'a helper older than keep has none: helios-lab up pushes the current one'
+}
+
 # --- ssh and console sessions ------------------------------------------------
 # Both replace helios-lab with ssh (exec), so the session's exit status is
 # the command's, and nothing of helios-lab outlives it.
@@ -920,8 +1048,9 @@ host_probe() {
   esac
 }
 
-# probe_anomalies <probe> -> its "! " lines (pure): a guest built from other
-# settings than pushed, a failed last provision run, a silent host
+# probe_anomalies <probe> <dead-man epoch> -> its "! " lines (pure): a guest
+# built from other settings than pushed, a failed last provision run, a
+# stop not armed or a failed idle check (U4), a silent host
 probe_anomalies() {
   local body note state kind stage reason
   body=$(probe_body "$1")
@@ -930,9 +1059,27 @@ probe_anomalies() {
                  [[ -z $note ]] || anomaly guest-mismatch "$note"
                  state=$(provision_state "$body")
                  IFS=$US read -r kind stage reason <<< "$state"
-                 [[ $kind != failed ]] || anomaly provision-failed "$stage" "$reason" ;;
+                 [[ $kind != failed ]] || anomaly provision-failed "$stage" "$reason"
+                 idle_anomalies "$body" "$2" ;;
     unreachable) anomaly host-silent "$PROBE_TIMEOUT_S" "$body" ;;
     failed)      anomaly probe-failed "$body" ;;
+  esac
+}
+
+# probe_autostop <probe> <now> <dead-man epoch> <idle-minutes> -> the
+# headline's auto-stop field (pure): what the host's idle facts say is
+# armed, else (no probe, or a helper older than U4) the configured window
+probe_autostop() {
+  local body armed
+  body=$(probe_body "$1")
+  if [[ $(probe_kind "$1") != ok ]] || ! armed=$(stops_armed "$body"); then
+    autostop_field "$4"
+    return 0
+  fi
+  case $armed in
+    idle|both) idle_field "$body" "$2" "$4" ;;
+    deadman)   deadman_field "$3" ;;
+    none)      echo 'no stop armed' ;;
   esac
 }
 
@@ -942,6 +1089,7 @@ probe_details() {
   body=$(probe_body "$1")
   case $(probe_kind "$1") in
     ok)          detail provision "$(provision_detail "$(provision_state "$body")")"
+                 detail idle "$(idle_detail "$body")"
                  detail guest "$(guest_detail "$body")"
                  last=$(console_lines "$body" | tail -1)
                  [[ -z $last ]] || detail console "${last:0:100}" ;;
