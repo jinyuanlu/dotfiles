@@ -1,0 +1,17 @@
+{
+    "Return": true,
+    "SecurityGroupRules": [
+        {
+            "SecurityGroupRuleId": "sgr-0123456789abcdef0",
+            "GroupId": "sg-0123456789abcdef0",
+            "GroupOwnerId": "123456789012",
+            "IsEgress": false,
+            "IpProtocol": "tcp",
+            "FromPort": 22,
+            "ToPort": 22,
+            "CidrIpv4": "203.0.113.10/32",
+            "Description": "spike",
+            "SecurityGroupRuleArn": "arn:aws:ec2:ap-northeast-1:123456789012:security-group-rule/sgr-0123456789abcdef0"
+        }
+    ]
+}

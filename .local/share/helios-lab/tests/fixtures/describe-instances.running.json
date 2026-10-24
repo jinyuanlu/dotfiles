@@ -1,0 +1,173 @@
+{
+    "Reservations": [
+        {
+            "ReservationId": "r-0123456789abcdef0",
+            "OwnerId": "123456789012",
+            "Groups": [],
+            "Instances": [
+                {
+                    "Architecture": "x86_64",
+                    "BlockDeviceMappings": [
+                        {
+                            "DeviceName": "/dev/sda1",
+                            "Ebs": {
+                                "AttachTime": "2026-10-24T10:50:40+00:00",
+                                "DeleteOnTermination": true,
+                                "Status": "attached",
+                                "VolumeId": "vol-0123456789abcdef0",
+                                "EbsCardIndex": 0
+                            }
+                        }
+                    ],
+                    "ClientToken": "00000000-0000-0000-0000-000000000000",
+                    "EbsOptimized": false,
+                    "EnaSupport": true,
+                    "Hypervisor": "xen",
+                    "NetworkInterfaces": [
+                        {
+                            "Association": {
+                                "IpOwnerId": "amazon",
+                                "PublicDnsName": "ec2-203-0-113-10.ap-northeast-1.compute.amazonaws.com",
+                                "PublicIp": "203.0.113.10"
+                            },
+                            "Attachment": {
+                                "AttachTime": "2026-10-24T10:50:39+00:00",
+                                "AttachmentId": "eni-attach-0123456789abcdef0",
+                                "DeleteOnTermination": true,
+                                "DeviceIndex": 0,
+                                "Status": "attached",
+                                "NetworkCardIndex": 0
+                            },
+                            "Description": "",
+                            "Groups": [
+                                {
+                                    "GroupId": "sg-0123456789abcdef0",
+                                    "GroupName": "helios-lab-spike"
+                                }
+                            ],
+                            "Ipv6Addresses": [],
+                            "MacAddress": "0a:00:00:00:00:01",
+                            "NetworkInterfaceId": "eni-0123456789abcdef0",
+                            "OwnerId": "123456789012",
+                            "PrivateDnsName": "ip-172-31-0-10.ap-northeast-1.compute.internal",
+                            "PrivateIpAddress": "172.31.0.10",
+                            "PrivateIpAddresses": [
+                                {
+                                    "Association": {
+                                        "IpOwnerId": "amazon",
+                                        "PublicDnsName": "ec2-203-0-113-10.ap-northeast-1.compute.amazonaws.com",
+                                        "PublicIp": "203.0.113.10"
+                                    },
+                                    "Primary": true,
+                                    "PrivateDnsName": "ip-172-31-0-10.ap-northeast-1.compute.internal",
+                                    "PrivateIpAddress": "172.31.0.10"
+                                }
+                            ],
+                            "SourceDestCheck": true,
+                            "Status": "in-use",
+                            "SubnetId": "subnet-0123456789abcdef0",
+                            "VpcId": "vpc-0123456789abcdef0",
+                            "InterfaceType": "interface",
+                            "Operator": {
+                                "Managed": false
+                            }
+                        }
+                    ],
+                    "RootDeviceName": "/dev/sda1",
+                    "RootDeviceType": "ebs",
+                    "SecurityGroups": [
+                        {
+                            "GroupId": "sg-0123456789abcdef0",
+                            "GroupName": "helios-lab-spike"
+                        }
+                    ],
+                    "SourceDestCheck": true,
+                    "Tags": [
+                        {
+                            "Key": "ManagedBy",
+                            "Value": "helios-lab-spike"
+                        },
+                        {
+                            "Key": "Project",
+                            "Value": "helios-lab"
+                        },
+                        {
+                            "Key": "Name",
+                            "Value": "helios-lab-spike"
+                        }
+                    ],
+                    "VirtualizationType": "hvm",
+                    "CpuOptions": {
+                        "CoreCount": 2,
+                        "ThreadsPerCore": 2,
+                        "NestedVirtualization": "enabled"
+                    },
+                    "CapacityReservationSpecification": {
+                        "CapacityReservationPreference": "open"
+                    },
+                    "HibernationOptions": {
+                        "Configured": false
+                    },
+                    "MetadataOptions": {
+                        "State": "applied",
+                        "HttpTokens": "required",
+                        "HttpPutResponseHopLimit": 1,
+                        "HttpEndpoint": "enabled",
+                        "HttpProtocolIpv6": "disabled",
+                        "InstanceMetadataTags": "disabled"
+                    },
+                    "EnclaveOptions": {
+                        "Enabled": false
+                    },
+                    "BootMode": "uefi-preferred",
+                    "PlatformDetails": "Linux/UNIX",
+                    "UsageOperation": "RunInstances",
+                    "UsageOperationUpdateTime": "2026-10-24T10:50:39+00:00",
+                    "PrivateDnsNameOptions": {
+                        "HostnameType": "ip-name",
+                        "EnableResourceNameDnsARecord": false,
+                        "EnableResourceNameDnsAAAARecord": false
+                    },
+                    "MaintenanceOptions": {
+                        "AutoRecovery": "default",
+                        "RebootMigration": "default"
+                    },
+                    "CurrentInstanceBootMode": "uefi",
+                    "NetworkPerformanceOptions": {
+                        "BandwidthWeighting": "default"
+                    },
+                    "Operator": {
+                        "Managed": false,
+                        "HiddenByDefault": false
+                    },
+                    "InstanceId": "i-0123456789abcdef0",
+                    "ImageId": "ami-0123456789abcdef0",
+                    "State": {
+                        "Code": 16,
+                        "Name": "running"
+                    },
+                    "PrivateDnsName": "ip-172-31-0-10.ap-northeast-1.compute.internal",
+                    "PublicDnsName": "ec2-203-0-113-10.ap-northeast-1.compute.amazonaws.com",
+                    "StateTransitionReason": "",
+                    "AmiLaunchIndex": 0,
+                    "ProductCodes": [],
+                    "InstanceType": "m8i.xlarge",
+                    "LaunchTime": "2026-10-24T10:50:39+00:00",
+                    "Placement": {
+                        "AvailabilityZoneId": "apne1-az4",
+                        "GroupName": "",
+                        "Tenancy": "default",
+                        "AvailabilityZone": "ap-northeast-1a"
+                    },
+                    "Monitoring": {
+                        "State": "disabled"
+                    },
+                    "SubnetId": "subnet-0123456789abcdef0",
+                    "VpcId": "vpc-0123456789abcdef0",
+                    "PrivateIpAddress": "172.31.0.10",
+                    "PublicIpAddress": "203.0.113.10"
+                }
+            ]
+        }
+    ]
+}

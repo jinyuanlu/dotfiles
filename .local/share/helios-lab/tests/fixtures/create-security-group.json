@@ -1,0 +1,14 @@
+{
+    "GroupId": "sg-0123456789abcdef0",
+    "Tags": [
+        {
+            "Key": "Project",
+            "Value": "helios-lab"
+        },
+        {
+            "Key": "ManagedBy",
+            "Value": "helios-lab-spike"
+        }
+    ],
+    "SecurityGroupArn": "arn:aws:ec2:ap-northeast-1:123456789012:security-group/sg-0123456789abcdef0"
+}

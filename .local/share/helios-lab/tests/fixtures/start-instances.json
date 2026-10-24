@@ -1,0 +1,15 @@
+{
+    "StartingInstances": [
+        {
+            "InstanceId": "i-0123456789abcdef0",
+            "CurrentState": {
+                "Code": 0,
+                "Name": "pending"
+            },
+            "PreviousState": {
+                "Code": 80,
+                "Name": "stopped"
+            }
+        }
+    ]
+}

@@ -1,0 +1,18 @@
+{
+    "InstanceType": "m8i.xlarge",
+    "ProcessorInfo": {
+        "SupportedArchitectures": [
+            "x86_64"
+        ],
+        "SustainedClockSpeedInGhz": 3.9,
+        "SupportedFeatures": [
+            "nested-virtualization",
+            "metal-compatibility"
+        ],
+        "Manufacturer": "Intel"
+    },
+    "DefaultVCpus": 4,
+    "MemoryInfo": {
+        "SizeInMiB": 16384
+    }
+}

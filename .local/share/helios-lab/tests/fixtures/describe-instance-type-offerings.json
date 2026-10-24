@@ -1,0 +1,19 @@
+{
+    "InstanceTypeOfferings": [
+        {
+            "InstanceType": "m8i.xlarge",
+            "LocationType": "availability-zone",
+            "Location": "ap-northeast-1d"
+        },
+        {
+            "InstanceType": "m8i.xlarge",
+            "LocationType": "availability-zone",
+            "Location": "ap-northeast-1a"
+        },
+        {
+            "InstanceType": "m8i.xlarge",
+            "LocationType": "availability-zone",
+            "Location": "ap-northeast-1c"
+        }
+    ]
+}

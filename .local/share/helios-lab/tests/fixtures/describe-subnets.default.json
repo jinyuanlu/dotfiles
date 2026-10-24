@@ -1,0 +1,30 @@
+{
+    "Subnets": [
+        {
+            "AvailabilityZoneId": "apne1-az4",
+            "MapCustomerOwnedIpOnLaunch": false,
+            "OwnerId": "123456789012",
+            "AssignIpv6AddressOnCreation": false,
+            "Ipv6CidrBlockAssociationSet": [],
+            "SubnetArn": "arn:aws:ec2:ap-northeast-1:123456789012:subnet/subnet-0123456789abcdef0",
+            "EnableDns64": false,
+            "Ipv6Native": false,
+            "PrivateDnsNameOptionsOnLaunch": {
+                "HostnameType": "ip-name",
+                "EnableResourceNameDnsARecord": false,
+                "EnableResourceNameDnsAAAARecord": false
+            },
+            "BlockPublicAccessStates": {
+                "InternetGatewayBlockMode": "off"
+            },
+            "SubnetId": "subnet-0123456789abcdef0",
+            "State": "available",
+            "VpcId": "vpc-0123456789abcdef0",
+            "CidrBlock": "172.31.0.10/20",
+            "AvailableIpAddressCount": 4090,
+            "AvailabilityZone": "ap-northeast-1a",
+            "DefaultForAz": true,
+            "MapPublicIpOnLaunch": true
+        }
+    ]
+}

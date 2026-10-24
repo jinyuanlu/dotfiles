@@ -1,0 +1,10 @@
+-----BEGIN HELIOS-LAB HOST KEYS-----
+256 SHA256:kz+Tw/36PkRNhaOvv5otG5S4Peg4eicnqhu/ViZnv2E root@ip-172-31-0-10 (ECDSA)
+256 SHA256:e3nmpQY3OllEnw+YTnIxOK1vZttbrX0xpEMwqyQdKTQ root@ip-172-31-0-10 (ED25519)
+3072 SHA256:9hcjRikxZizaUSG/cApq60iZprEd0hVolHI1efCVgfk root@ip-172-31-0-10 (RSA)
+-----END HELIOS-LAB HOST KEYS-----
+<14>Oct 24 10:50:55 cloud-init: -----BEGIN SSH HOST KEY FINGERPRINTS-----
+<14>Oct 24 10:50:55 cloud-init: 256 SHA256:kz+Tw/36PkRNhaOvv5otG5S4Peg4eicnqhu/ViZnv2E root@ip-172-31-0-10 (ECDSA)
+<14>Oct 24 10:50:55 cloud-init: 256 SHA256:e3nmpQY3OllEnw+YTnIxOK1vZttbrX0xpEMwqyQdKTQ root@ip-172-31-0-10 (ED25519)
+<14>Oct 24 10:50:55 cloud-init: 3072 SHA256:9hcjRikxZizaUSG/cApq60iZprEd0hVolHI1efCVgfk root@ip-172-31-0-10 (RSA)
+<14>Oct 24 10:50:55 cloud-init: -----END SSH HOST KEY FINGERPRINTS-----

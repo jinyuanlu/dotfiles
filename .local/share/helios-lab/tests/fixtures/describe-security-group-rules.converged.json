@@ -1,0 +1,41 @@
+{
+    "SecurityGroupRules": [
+        {
+            "SecurityGroupRuleId": "sgr-0123456789abcdef0",
+            "GroupId": "sg-0123456789abcdef0",
+            "GroupOwnerId": "123456789012",
+            "IsEgress": true,
+            "IpProtocol": "tcp",
+            "FromPort": 80,
+            "ToPort": 80,
+            "CidrIpv4": "0.0.0.0/0",
+            "Tags": [],
+            "SecurityGroupRuleArn": "arn:aws:ec2:ap-northeast-1:123456789012:security-group-rule/sgr-0123456789abcdef0"
+        },
+        {
+            "SecurityGroupRuleId": "sgr-0123456789abcdef0",
+            "GroupId": "sg-0123456789abcdef0",
+            "GroupOwnerId": "123456789012",
+            "IsEgress": true,
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "CidrIpv4": "0.0.0.0/0",
+            "Tags": [],
+            "SecurityGroupRuleArn": "arn:aws:ec2:ap-northeast-1:123456789012:security-group-rule/sgr-0123456789abcdef0"
+        },
+        {
+            "SecurityGroupRuleId": "sgr-0123456789abcdef0",
+            "GroupId": "sg-0123456789abcdef0",
+            "GroupOwnerId": "123456789012",
+            "IsEgress": false,
+            "IpProtocol": "tcp",
+            "FromPort": 22,
+            "ToPort": 22,
+            "CidrIpv4": "203.0.113.10/32",
+            "Description": "spike",
+            "Tags": [],
+            "SecurityGroupRuleArn": "arn:aws:ec2:ap-northeast-1:123456789012:security-group-rule/sgr-0123456789abcdef0"
+        }
+    ]
+}
