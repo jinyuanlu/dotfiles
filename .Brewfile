@@ -35,3 +35,5 @@ cask "rectangle"
 brew "stripe"
 brew "pipx"
 brew "asdf"
+brew "awscli" # helios-lab; nested virtualization needs >= 2.33.21
+brew "shellcheck" # lints helios-lab (its tests/run checks every script)

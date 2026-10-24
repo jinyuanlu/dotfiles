@@ -1,0 +1,212 @@
+#!/bin/bash
+# shellcheck source-path=SCRIPTDIR
+#
+# helios-lab — an x86 Helios (illumos) VM on AWS, for DTrace and MDB work.
+#
+# Manages one nested-virtualization EC2 host in ap-northeast-1 that runs one
+# Helios guest under helios-engvm. `helios-lab help` lists the commands; the
+# README's "Helios Lab" section covers setup and costs.
+#
+# Why /bin/bash and no jq: this must run on a stock Mac. Everything here is
+# bash 3.2 (no associative arrays, mapfile, ${v,,}, declare -n or &>>), and
+# AWS output is shaped with the CLI's own --query / --output text.
+#
+# Layout: this file holds config, status orchestration and dispatch. Pure
+# decisions live in lib/state.sh, every AWS call in lib/aws.sh, both under
+# ${HELIOS_LAB_HOME:-~/.local/share/helios-lab}.
+#
+# Exit codes (typed, so scripts and tests can tell failures apart):
+#   0  ok
+#   1  generic failure
+#   2  usage: unknown command, bad argument or bad env value
+#   3  AWS auth: missing or invalid credentials, expired SSO, permission denied
+#   4  state conflict, e.g. more than one lab instance
+#   5  capacity: EC2 has no capacity for the type (U6)
+#   6  host-key verification failure (U2)
+#   8  network: AWS unreachable
+#
+# Env (the only knobs; region, root size and key path are constants):
+#   HELIOS_LAB_PROFILE        AWS profile (default: helios-lab)
+#   HELIOS_LAB_INSTANCE_TYPE  instance type, applied only at create (default: m8i.xlarge)
+#   HELIOS_LAB_IDLE_MINUTES   idle minutes before the host stops itself (default: 60)
+# For tests: HELIOS_LAB_HOME (library dir), HELIOS_LAB_STATE_DIR (state dir).
+#
+set -euo pipefail
+
+readonly SELF=helios-lab
+# shellcheck disable=SC2034  # the whole table lives here; U2 and U6 raise 5 and 6
+readonly EX_OK=0 EX_FAIL=1 EX_USAGE=2 EX_AUTH=3 EX_CONFLICT=4 EX_CAPACITY=5 EX_HOSTKEY=6 EX_NET=8
+
+warn() { printf '%s: %s\n' "$SELF" "$1" >&2; }
+
+# die <code> <message> [hint...] — the code comes first, so every exit is typed
+# at its call site. Hints print indented under the message.
+die() {
+  local code=$1 hint
+  shift
+  warn "$1"
+  shift
+  for hint in "$@"; do printf '  %s\n' "$hint" >&2; done
+  exit "$code"
+}
+
+# --- Libraries ---------------------------------------------------------------
+# Sourced from the yadm-deployed share dir. Tests point HELIOS_LAB_HOME at the
+# repo checkout, so they exercise the working tree, not an installed copy.
+readonly HELIOS_LAB_HOME="${HELIOS_LAB_HOME:-$HOME/.local/share/helios-lab}"
+[[ -r $HELIOS_LAB_HOME/lib/state.sh && -r $HELIOS_LAB_HOME/lib/aws.sh ]] \
+  || die "$EX_FAIL" "libraries not found in $HELIOS_LAB_HOME/lib" 'run yadm pull, or set HELIOS_LAB_HOME'
+# shellcheck source=../share/helios-lab/lib/state.sh
+source "$HELIOS_LAB_HOME/lib/state.sh"
+# shellcheck source=../share/helios-lab/lib/aws.sh
+source "$HELIOS_LAB_HOME/lib/aws.sh"
+
+# --- Configuration -----------------------------------------------------------
+readonly PROFILE="${HELIOS_LAB_PROFILE:-helios-lab}"
+readonly INSTANCE_TYPE="${HELIOS_LAB_INSTANCE_TYPE:-m8i.xlarge}"
+readonly IDLE_MINUTES="${HELIOS_LAB_IDLE_MINUTES:-60}"
+# shellcheck disable=SC2034  # U2 (known_hosts) and U6 (lock) live here; U1 only reads AWS
+readonly STATE_DIR="${HELIOS_LAB_STATE_DIR:-$HOME/.local/state/helios-lab}"
+
+# validate_config — fail fast on a bad knob, before any AWS call
+validate_config() {
+  instance_type_ok "$INSTANCE_TYPE" || die "$EX_USAGE" \
+    "HELIOS_LAB_INSTANCE_TYPE=$INSTANCE_TYPE does not support nested virtualization" \
+    "use a non-metal size of one of: $(nested_virt_families)"
+  idle_minutes_ok "$IDLE_MINUTES" || die "$EX_USAGE" \
+    "HELIOS_LAB_IDLE_MINUTES=$IDLE_MINUTES is not a multiple of 5 between 5 and 720"
+}
+
+# --- Discovery ---------------------------------------------------------------
+# discover_single -> the one live lab instance's row, or nothing when absent.
+# Invariant: at most one live tagged instance exists. More than one is a state
+# conflict (exit 4) listing every ID, never auto-resolved. Every command except
+# status and destroy goes through here. Callers: declare the local first, then
+# assign (`local row; row=$(discover_single)`), or `local` masks the exit code.
+discover_single() {
+  local rows
+  rows=$(aws_discover_instances)
+  (( $(count_rows "$rows") <= 1 )) \
+    || die "$EX_CONFLICT" "$(duplicates_message "$rows")" "helios-lab status lists them"
+  printf '%s' "$rows"
+}
+
+# --- status ------------------------------------------------------------------
+# Read-only by construction. Invariant: status never mutates AWS or host state.
+# It calls only describe-* operations and checkip; the suite checks every
+# status scenario's recorded calls. Order: anomalies, then the money-and-time
+# line, then details.
+cmd_status() {
+  local rows
+  rows=$(aws_discover_instances)
+  case $(count_rows "$rows") in
+    0) status_absent ;;
+    1) status_one "$rows" ;;
+    *) duplicates_report "$rows" ;;
+  esac
+}
+
+# status_absent — no instance; a lab security group left behind is an anomaly
+status_absent() {
+  local groups group
+  groups=$(aws_discover_groups)
+  while IFS= read -r group; do
+    [[ -z $group ]] || anomaly orphan-group "$group"
+  done <<< "$groups"
+  status_headline absent
+}
+
+# status_one <row>
+status_one() {
+  local id state type az ip launch group code reason now
+  IFS=$US read -r id state type az ip launch group code reason <<< "$1"
+  now=$(date +%s)
+  status_anomalies "$state" "$group" "$reason" "$now"
+  status_headline "$state" "$type" "$(uptime_s "$launch" "$now")" \
+    "$(stop_cause "$code" "$reason")" '' "$(autostop_field "$IDLE_MINUTES")"
+  status_details "$id" "$az" "$type" "$ip"
+  # --- Extension point (U3/U4) ---
+  # Host and guest fields (provision stage, guest state and pin/sizing
+  # mismatch, idle countdown, keep-until, failed idle run) come from 3-second
+  # SSH probes and append here; U3 also passes the guest field to
+  # status_headline. They must stay read-only, like everything in status.
+}
+
+# status_anomalies <state> <group-id> <reason> <now>
+status_anomalies() {
+  local stuck
+  case $1 in
+    stopping) if stuck=$(stuck_for "$3" "$4"); then anomaly stuck-stopping "$stuck"; fi ;;
+    running)  ip_anomaly "$2" ;;
+  esac
+}
+
+# ip_anomaly <group-id> — only a running host is connectable, so only then does
+# a stale ingress rule matter. A failed IP lookup is itself an anomaly.
+ip_anomaly() {
+  local ip rules
+  [[ $1 != None ]] || return 0
+  if ! ip=$(caller_ip); then
+    anomaly ip-unknown
+    return 0
+  fi
+  rules=$(aws_ingress_rules "$1")
+  ingress_allows "$ip" "$rules" || anomaly ip-not-allowed "$ip"
+}
+
+# --- help --------------------------------------------------------------------
+cmd_help() {
+  cat <<EOF
+$SELF: an x86 Helios (illumos) VM on AWS, for DTrace and MDB.
+
+usage: $SELF <command>
+
+commands:
+  up                      create or start the host, boot the guest, check DTrace
+  stop                    stop the host; its disk and the guest are kept
+  status                  state, cost so far and auto-stop time; anomalies first
+  ssh [guest|host] [cmd]  ssh into the guest (default) or the host
+  console                 attach to the guest's serial console
+  keep <duration>|off     hold off the idle auto-stop (at most 12h), or clear it
+  destroy [--yes]         preview what would be deleted; --yes deletes exactly that
+  runbook                 print the path of the DTrace and MDB runbook
+  help                    show this screen
+
+environment:
+  HELIOS_LAB_PROFILE        AWS profile (default: helios-lab)
+  HELIOS_LAB_INSTANCE_TYPE  instance type, used only at create (default: m8i.xlarge)
+                            families: c8i m8i r8i (and -flex), c7i m7i r7i
+  HELIOS_LAB_IDLE_MINUTES   idle minutes before the host stops itself (default: 60)
+
+Region $REGION. Costs are approximate (prices as of $PRICE_DATE).
+EOF
+}
+
+# --- Dispatch ----------------------------------------------------------------
+# not_yet <unit> <command> — dispatch is complete from U1 on; later units
+# replace these stubs one by one.
+not_yet() { die "$EX_FAIL" "$2: not implemented yet ($1)"; }
+
+main() {
+  local cmd=${1:-}
+  case $cmd in
+    help|-h|--help) cmd_help; return 0 ;;
+    '')             cmd_help >&2; exit "$EX_USAGE" ;;
+  esac
+  shift
+  validate_config
+  case $cmd in
+    status)          (( $# == 0 )) || die "$EX_USAGE" 'status takes no arguments'
+                     cmd_status ;;
+    up|stop|destroy) not_yet U6 "$cmd" ;;
+    ssh|console)     not_yet U3 "$cmd" ;;
+    keep)            not_yet U4 "$cmd" ;;
+    runbook)         not_yet U5 "$cmd" ;;
+    *)               die "$EX_USAGE" "unknown command: $cmd" "try: $SELF help" ;;
+  esac
+}
+
+# Run only when executed, so tests can source this file and call its functions.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

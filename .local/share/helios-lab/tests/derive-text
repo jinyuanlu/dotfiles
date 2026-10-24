@@ -1,0 +1,44 @@
+#!/bin/bash
+#
+# derive-text <query> <fixture.json> — print exactly what
+#   aws ... --query <query> --output text
+# prints for a captured response, without calling AWS. Use it to (re)make the
+# stub replies in tests/fixtures/derived/ whenever a query in lib/aws.sh changes:
+#
+#   tests/derive-text "$Q" tests/fixtures/describe-instances.running.json \
+#     > tests/fixtures/derived/describe-instances.running.discover.txt
+#
+# Offline by construction: it loads two pure pieces of the Homebrew awscli
+# bundle, the jmespath library and awscli/text.py (the --output text formatter,
+# which imports nothing), and runs them on a local file. It never runs `aws`,
+# reads no credentials and opens no network connection. Dev-only: the suite
+# does not call it.
+#
+# Caveat: the CLI applies --query per page of a paginated response; a captured
+# fixture is a single page, so this matches the CLI for it.
+set -euo pipefail
+
+readonly SELF=derive-text
+die() { printf '%s: %s\n' "$SELF" "$1" >&2; exit "${2:-1}"; }
+
+(( $# == 2 )) || die 'usage: derive-text <query> <fixture.json>' 2
+[[ -r $2 ]] || die "cannot read $2" 2
+
+prefix=$(brew --prefix awscli 2>/dev/null) || die 'needs the Homebrew awscli bundle: brew install awscli'
+python=$prefix/libexec/bin/python3
+site=''
+for dir in "$prefix"/libexec/lib/python3*/site-packages; do site=$dir; done
+[[ -x $python && -r $site/awscli/text.py && -d $site/jmespath ]] \
+  || die "awscli bundle layout not recognised under $prefix/libexec"
+
+exec "$python" - "$site" "$1" "$2" <<'PY'
+import importlib.util, json, sys
+site, query, path = sys.argv[1:4]
+sys.path.insert(0, site)
+import jmespath
+spec = importlib.util.spec_from_file_location("awscli_text", site + "/awscli/text.py")
+text = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(text)
+with open(path) as f:
+    text.format_text(jmespath.search(query, json.load(f)), sys.stdout)
+PY

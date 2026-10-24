@@ -1,0 +1,14 @@
+#!/bin/bash
+# shellcheck source-path=SCRIPTDIR
+#
+# Stub `curl` for the helios-lab tests, so no test reaches the network (the
+# caller-IP lookup in lib/aws.sh is the only curl user). Records "curl <args>"
+# in STUB_LOG and replays the reply named "curl" from STUB_CURL_DIR, with the
+# same file convention as the aws stub: curl, curl.stderr, curl.exit, curl.N.
+set -euo pipefail
+
+# shellcheck source=../stub-replay.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-replay.sh"
+
+stub_record curl "$@"
+stub_replay "${STUB_CURL_DIR:?STUB_CURL_DIR is not set}" curl

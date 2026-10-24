@@ -29,3 +29,27 @@ real values before they are committed. Never hand-edit a real ID into a fixture.
 | `get-console-output.latest.later-boot.txt` | Later boot: per-boot block only, with systemd lines interleaved |
 | `get-console-output.buffered.first-boot.txt` | Without `--latest`: empty |
 | the rest | Plain responses for describe, create, start, stop, terminate and delete calls |
+
+## Derived replies (`derived/`)
+
+The code always asks for `--output text` and shapes it with `--query`, and the
+stub replays bytes without evaluating the query. So a stub reply is usually not
+a capture above but **what the CLI prints for one query over one capture**:
+`derived/<capture>.<query>.txt`.
+
+These are not hand-written. `../derive-text '<query>' <capture>.json` produces
+them offline with the CLI's own JMESPath library and text formatter (it never
+runs `aws`). Re-derive whenever a query in `lib/aws.sh` changes; the lifecycle
+tests pin each query string, so a changed query fails until you do. Tests make
+variants (another state, another reason) by editing columns of these rows.
+
+| Derived reply | Query (`lib/aws.sh`) |
+|---|---|
+| `describe-instances.{running,stopped-idle,stopped-user}.discover.txt` | `Q_DISCOVER` |
+| `describe-security-group-rules.converged.ingress.txt` | `Q_INGRESS` |
+
+Text-output rules worth knowing when reading them: a null prints `None`, an
+empty string prints an empty field, each inner list prints as one tab-separated
+line, and an empty list prints nothing (so "no instances" is an empty reply).
+There is no `describe-security-groups` capture; its one-ID-per-line reply for
+`Q_GROUP_IDS` is written inline in the tests.

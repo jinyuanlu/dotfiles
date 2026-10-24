@@ -1,0 +1,73 @@
+#!/bin/bash
+#
+# tests/run — the helios-lab suite: every *.test.sh under stock /bin/bash
+# (the Mac-side target), then shellcheck over every script. Exits 0 only when
+# everything passes.
+#
+#   .local/share/helios-lab/tests/run            # all test files
+#   .local/share/helios-lab/tests/run lifecycle  # files matching *lifecycle*
+#
+# Safety: no test may reach AWS or the network. tests/stubs goes first on
+# PATH, and the run refuses to start unless `aws` and `curl` resolve there.
+# As a second net, AWS config and credential files point at /dev/null and
+# every AWS_* credential variable is unset, so even a stray real CLI could
+# not authenticate.
+set -euo pipefail
+
+readonly SELF=tests/run
+die() { printf '%s: %s\n' "$SELF" "$1" >&2; exit 1; }
+
+TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+readonly TESTS_DIR
+
+# --- Environment -------------------------------------------------------------
+export HELIOS_LAB_HOME=${TESTS_DIR%/tests}
+HELIOS_LAB_BIN=$(cd "$HELIOS_LAB_HOME/../../bin" && pwd)/helios-lab
+export HELIOS_LAB_BIN
+export PATH="$TESTS_DIR/stubs:$PATH"
+export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_EC2_METADATA_DISABLED=true
+unset AWS_PROFILE AWS_DEFAULT_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+  AWS_REGION AWS_DEFAULT_REGION HELIOS_LAB_PROFILE HELIOS_LAB_INSTANCE_TYPE HELIOS_LAB_IDLE_MINUTES
+
+for tool in aws curl; do
+  [[ $(command -v "$tool") == "$TESTS_DIR/stubs/$tool" ]] \
+    || die "refusing to run: $tool resolves to $(command -v "$tool"), not the stub"
+done
+
+TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/helios-lab-tests.XXXXXX")
+export TEST_TMP TEST_RESULTS=$TEST_TMP/results HELIOS_LAB_STATE_DIR=$TEST_TMP/state
+trap 'rm -rf "$TEST_TMP"' EXIT
+
+# --- Tests -------------------------------------------------------------------
+# A file that dies before reporting (say, a syntax error) counts as a failure.
+broken=0
+for file in "$TESTS_DIR"/*"${1:-}"*.test.sh; do
+  [[ -e $file ]] || die "no test files match '${1:-}'"
+  echo "${file##*/}"
+  /bin/bash "$file" || { broken=$(( broken + 1 )); echo "  FAIL  ${file##*/} exited non-zero"; }
+done
+
+passed=0 failed=0
+if [[ -f $TEST_RESULTS ]]; then
+  while read -r p f; do passed=$(( passed + p )); failed=$(( failed + f )); done < "$TEST_RESULTS"
+fi
+echo
+echo "$passed passed, $failed failed"
+
+# --- Lint --------------------------------------------------------------------
+# The linter backs the suite. Not installed: say so loudly, don't fail.
+# Every script of the command, including ones later units add (host helper).
+lint=0 scripts=()
+for file in "$HELIOS_LAB_BIN" "$HELIOS_LAB_HOME"/lib/*.sh "$HELIOS_LAB_HOME"/host/helios-lab-host \
+  "$TESTS_DIR"/run "$TESTS_DIR"/derive-text "$TESTS_DIR"/*.sh "$TESTS_DIR"/stubs/*; do
+  [[ ! -f $file ]] || scripts+=("$file")
+done
+if command -v shellcheck >/dev/null 2>&1; then
+  if shellcheck -x "${scripts[@]}"; then echo "shellcheck: clean (${#scripts[@]} files)"
+  else lint=1; echo 'shellcheck: FAILED'
+  fi
+else
+  echo 'shellcheck: SKIPPED, not installed (brew bundle --global)'
+fi
+
+(( failed == 0 && broken == 0 && lint == 0 ))

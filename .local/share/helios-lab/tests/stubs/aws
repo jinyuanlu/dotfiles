@@ -1,0 +1,49 @@
+#!/bin/bash
+# shellcheck source-path=SCRIPTDIR
+#
+# Stub `aws` for the helios-lab tests. It is never the real CLI: tests/run puts
+# tests/stubs first on PATH and refuses to start unless `aws` resolves here.
+#
+# Reply convention: pre-queried text (U6 and later follow this too)
+#   The code under test always calls
+#     aws <service> <operation> [args...] [--query Q] --output text --profile P --region ap-northeast-1
+#   The stub does NOT evaluate --query. A reply file holds the exact bytes the
+#   real CLI would print for that call, with its query and text output applied.
+#   Don't hand-write them: derive them from a captured fixture
+#   (tests/fixtures/*.json) with tests/derive-text, which runs the CLI's own
+#   JMESPath and text formatter offline, and keep them in
+#   tests/fixtures/derived/ (see tests/fixtures/README.md). Tests make variants
+#   by editing fields of those derived rows (set_field in tests/lib.sh).
+#
+# Reply name: <service>-<operation>, e.g. ec2-describe-instances or
+# sts-get-caller-identity; `aws --version` is "version". Files, sequences
+# (<name>.1, <name>.2, ...) and the exit-97 "no reply" rule: tests/stub-replay.sh.
+#
+# Enforced on every call except --version (exit 98 otherwise), so no test can
+# pass on a call the real CLI would treat differently:
+#   service and operation first, --region ap-northeast-1, a --profile, --output text.
+#
+# Env: STUB_AWS_DIR (the scenario's replies), STUB_LOG (one line per call:
+# "aws <args>").
+set -euo pipefail
+
+# shellcheck source=../stub-replay.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-replay.sh"
+
+contract_fail() { printf 'stub aws: %s: aws %s\n' "$1" "${*:2}" >&2; exit 98; }
+
+# check_contract <args...> — the call contract from lib/aws.sh
+check_contract() {
+  local all=" $* "
+  [[ ${1:-} != -* && -n ${2:-} ]] || contract_fail 'service and operation must come first' "$@"
+  case $all in *' --region ap-northeast-1 '*) ;; *) contract_fail 'missing --region ap-northeast-1' "$@" ;; esac
+  case $all in *' --profile '?*) ;; *) contract_fail 'missing --profile' "$@" ;; esac
+  case $all in *' --output text '*) ;; *) contract_fail 'missing --output text' "$@" ;; esac
+}
+
+stub_record aws "$@"
+if [[ ${1:-} == --version ]]; then
+  stub_replay "${STUB_AWS_DIR:?STUB_AWS_DIR is not set}" version
+fi
+check_contract "$@"
+stub_replay "${STUB_AWS_DIR:?STUB_AWS_DIR is not set}" "$1-$2"
