@@ -1,1 +1,1 @@
-i-0123456789abcdef0	stopped	m8i.xlarge	ap-northeast-1a	None	2026-10-24T11:04:03+00:00	sg-0123456789abcdef0	Client.UserInitiatedShutdown	User initiated (2026-10-24 11:05:21 GMT)
+i-0123456789abcdef0	stopped	m8i.xlarge	ap-northeast-1a	None	2026-10-24T11:04:03+00:00	sg-0123456789abcdef0	Client.UserInitiatedShutdown	User initiated (2026-10-24 11:05:21 GMT)	None

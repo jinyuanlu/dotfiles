@@ -50,9 +50,8 @@ variants (another state, another reason) by editing columns of these rows.
 
 | Derived reply | Query (`lib/aws.sh`) |
 |---|---|
-| `describe-instances.{running,stopped-idle,stopped-user}.discover.txt` | `Q_DISCOVER` |
+| `describe-instances.{running,stopped-idle,stopped-user}.discover.txt` | `Q_DISCOVER` (its last column, the `KeyFingerprint` tag, is `None`: the spike's instance had none) |
 | `describe-security-group-rules.converged.ingress.txt` | `Q_INGRESS` |
-| `describe-instances.running.key-tag.txt` | `Q_KEY_TAG` (`None`: the spike's instance had no `KeyFingerprint` tag) |
 | `describe-instances.running.root-volumes.txt` | `Q_ROOT_VOLUMES` |
 | `sts-get-caller-identity.caller.txt` | `Q_CALLER` |
 | `describe-vpcs.default.vpc.txt` | `Q_VPC` |
@@ -101,8 +100,9 @@ they print only IDs. The tests build these inline and mark each one:
 - the guest (U3): `helios-lab-host status` replies (`../lib.sh`
   `guest_status_reply`), checked against the helper's own `status` the same
   way in `guest.test.sh`; and what the guest itself prints, which the spike
-  observed but did not capture: `uname -o`'s `illumos`, dtrace's stdout for
-  a `BEGIN` probe that exits, the end of the first-boot console transcript
+  observed but did not capture: the smoke command's reply (`../lib.sh`
+  `smoke_reply`: `uname -o`'s `illumos` and what dtrace prints for a `BEGIN`
+  probe that exits, each followed by its marker line), the end of the first-boot console transcript
   (`INFO ok, run complete`, `Hostname: helios`), and `virsh domstate` lines.
   The guest's DHCP address is in libvirt's default `192.168.122.0/24`.
 - the idle stop (U4): the idle lines of a `helios-lab-host status` reply

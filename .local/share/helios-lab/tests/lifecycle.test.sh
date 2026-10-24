@@ -33,7 +33,7 @@ calls() { cat "$STUB_LOG"; }
 test_up_action_covers_every_ec2_state() {
   load_cli
   local pair
-  for pair in absent:create pending:none running:none stopping:wait-then-start \
+  for pair in absent:create pending:wait running:none stopping:wait-then-start \
               stopped:start shutting-down:wait-then-create; do
     assert_eq "${pair#*:}" "$(up_action "${pair%%:*}")" "up_action ${pair%%:*}"
   done
@@ -55,8 +55,9 @@ test_discovery_filters_on_both_tags_and_every_live_state() {
   row=$(aws_discover_instances)
   assert_contains "$(calls)" 'aws ec2 describe-instances --filters Name=tag:Project,Values=helios-lab Name=tag:ManagedBy,Values=helios-lab-cli Name=instance-state-name,Values=pending,running,stopping,stopped,shutting-down'
   # Pinned on purpose: change Q_DISCOVER and this fails until fixtures/derived is re-derived.
-  assert_contains "$(calls)" '--query Reservations[].Instances[].[InstanceId,State.Name,InstanceType,Placement.AvailabilityZone,PublicIpAddress,LaunchTime,SecurityGroups[0].GroupId,StateReason.Code,StateTransitionReason] --output text --profile helios-lab --region ap-northeast-1'
-  assert_eq "$LAB_ID${US}running${US}m8i.xlarge${US}ap-northeast-1a${US}$FIXTURE_IP${US}2026-10-24T10:50:39+00:00${US}$LAB_GROUP${US}None${US}" "$row"
+  assert_contains "$(calls)" "--query Reservations[].Instances[].[InstanceId,State.Name,InstanceType,Placement.AvailabilityZone,PublicIpAddress,LaunchTime,SecurityGroups[0].GroupId,StateReason.Code,StateTransitionReason,Tags[?Key=='KeyFingerprint'].Value | [0]] --output text --profile helios-lab --region ap-northeast-1"
+  # The last column is the KeyFingerprint tag: None, as the spike's instance had none.
+  assert_eq "$LAB_ID${US}running${US}m8i.xlarge${US}ap-northeast-1a${US}$FIXTURE_IP${US}2026-10-24T10:50:39+00:00${US}$LAB_GROUP${US}None${US}${US}None" "$row"
 }
 
 test_every_aws_call_uses_the_configured_profile_and_pinned_region() {
@@ -183,8 +184,8 @@ test_running_headline_for_2h10m_on_m8i_xlarge() {
 test_stop_cause_for_an_idle_stop_has_no_time() {
   load_cli
   reply ec2-describe-instances "$STOPPED_IDLE"
-  local id state type az ip launch group code reason
-  IFS=$US read -r id state type az ip launch group code reason <<< "$(aws_discover_instances)"
+  local id state type az ip launch group code reason tag
+  IFS=$US read -r id state type az ip launch group code reason tag <<< "$(aws_discover_instances)"
   assert_eq Client.InstanceInitiatedShutdown "$code"
   assert_eq 'User initiated' "$reason"   # EC2 records no time for this case
   assert_eq 'stopped by idle timer' "$(stop_cause "$code" "$reason")"
@@ -193,8 +194,8 @@ test_stop_cause_for_an_idle_stop_has_no_time() {
 test_stop_cause_for_a_manual_stop_shows_local_time() {
   load_cli
   reply ec2-describe-instances "$STOPPED_USER"
-  local id state type az ip launch group code reason
-  IFS=$US read -r id state type az ip launch group code reason <<< "$(aws_discover_instances)"
+  local id state type az ip launch group code reason tag
+  IFS=$US read -r id state type az ip launch group code reason tag <<< "$(aws_discover_instances)"
   assert_eq Client.UserInitiatedShutdown "$code"
   export TZ=Asia/Tokyo
   assert_eq 'stopped by you 20:05' "$(stop_cause "$code" "$reason")"

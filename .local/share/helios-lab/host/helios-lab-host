@@ -137,6 +137,10 @@ readonly GUEST_VERIFIED=$MARKER_DIR/guest-verified
 # about a minute in the spike. The stage waits this long for it to run.
 readonly CREATE_WAIT_S=300
 readonly TRANSCRIPT_LINES=20   # what status shows of a first boot's console
+# The units progress and status report on. One `systemctl show` asks for
+# them all (unit_show) and prints one block per unit, in the order asked,
+# one blank line apart, so a unit's place in this list finds its block.
+readonly STATUS_UNITS="$SERVICE $IDLE_TIMER $IDLE_SERVICE $DEADMAN_TIMER $CREATE_UNIT"
 # helios-engvm needs Ubuntu's QEMU (its domain XML names pc-i440fx-focal);
 # libnss-libvirt resolves `helios` for the Mac's ProxyJump; cpu-checker gives
 # kvm-ok; cpio is engvm's; nftables loads the guard.
@@ -250,6 +254,53 @@ conf_problem() {
 }
 
 idle_ok() { [[ $1 =~ ^[1-9][0-9]{0,2}$ ]] && (( $1 % 5 == 0 && $1 <= 720 )); }
+
+# show_value <`systemctl show` text> <n> <property> -> the property's value
+# in the nth KEY=value block (blocks are one blank line apart), or unknown
+show_value() {
+  local line n=1 value=''
+  while IFS= read -r line; do
+    if [[ -z $line ]]; then n=$(( n + 1 ))
+    elif (( n == $2 )) && [[ $line == "$3="* ]]; then value=${line#*=}
+    fi
+  done <<< "$1"
+  echo "${value:-unknown}"
+}
+
+# lock_held <apt or dpkg output> -> 0 when it failed because another apt or
+# dpkg run holds a lock (apt-daily on a first boot): the one failure the
+# packages stage waits out. apt says "Could not get lock" or "Unable to
+# acquire the dpkg frontend lock" or "Unable to lock directory"; dpkg says
+# its "lock was locked by another process", or, before 1.21, its "status
+# database is locked by another process".
+lock_held() {
+  case $1 in
+    *'Could not get lock'*|*'Unable to acquire the dpkg frontend lock'*|*'Unable to lock directory'*|\
+    *'locked by another process'*|*'database is locked'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# apt_said <apt or dpkg output> -> its own error line: the first "E: " or
+# "dpkg: error" line, else its last non-blank line, else nothing
+apt_said() {
+  local line last=''
+  while IFS= read -r line; do
+    case $line in 'E: '*|'dpkg: error'*) printf '%s\n' "$line"; return 0 ;; esac
+    [[ -z ${line//[[:space:]]/} ]] || last=$line
+  done <<< "$1"
+  printf '%s' "$last"
+}
+
+# unit_place <unit> -> its place in STATUS_UNITS, from 1; 0 when it is not there
+unit_place() {
+  local unit n=0
+  for unit in $STATUS_UNITS; do
+    n=$(( n + 1 ))
+    [[ $unit != "$1" ]] || { echo "$n"; return 0; }
+  done
+  echo 0
+}
 
 # with_libvirt_guest <nsswitch.conf text> -> the same, with libvirt_guest on
 # the hosts line (right after "files"), so the host resolves the guest's
@@ -706,18 +757,28 @@ apt_get() {
   apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -q "$@"
 }
 
-# with_lock_retries <command...> — DPkg::Lock::Timeout covers only dpkg's
-# frontend lock; dpkg itself and `apt-get update`'s lists lock fail at once
-# while another apt holds them (apt-daily, on a first boot). So retry: up to
-# 30 tries, 10 s apart.
-readonly LOCK_TRIES=30
+# with_lock_retries <what> <command...> — inside a stage: runs the command,
+# then passes its output (stderr joined in) on to the journal, so it can be
+# read for a held lock. DPkg::Lock::Timeout covers only dpkg's frontend lock;
+# dpkg itself and `apt-get update`'s lists lock fail at once while another
+# apt holds them (apt-daily, on a first boot). So a failure that says a lock
+# is held (lock_held) is tried again, up to LOCK_TRIES times LOCK_WAIT_S
+# apart; any other failure fails the stage at once, with apt's own error
+# line (apt_said).
+readonly LOCK_TRIES=30 LOCK_WAIT_S=10
 with_lock_retries() {
-  local n
-  for (( n = 1; n <= LOCK_TRIES; n++ )); do
-    "$@" && return 0
-    (( n == LOCK_TRIES )) || sleep 10
+  local what=$1 n out rc said
+  shift
+  for (( n = 1; ; n++ )); do
+    rc=0
+    out=$("$@" 2>&1) || rc=$?
+    [[ -z $out ]] || printf '%s\n' "$out"
+    (( rc != 0 )) || return 0
+    said=$(apt_said "$out")
+    lock_held "$out" || stage_fail "$what failed (exit $rc)${said:+: $said}"
+    (( n < LOCK_TRIES )) || stage_fail "$what found the lock held in $LOCK_TRIES tries, ${LOCK_WAIT_S}s apart: another apt or dpkg run holds it (see the journal)"
+    sleep "$LOCK_WAIT_S"
   done
-  return 1
 }
 
 stage_packages() {
@@ -727,10 +788,10 @@ stage_packages() {
   # A first boot may still be running cloud-init, which can hold apt.
   timeout 600 cloud-init status --wait >/dev/null 2>&1 || echo 'cloud-init did not report done; continuing'
   # Finishes a dpkg run that a stop interrupted (`stop` mid-apt).
-  with_lock_retries dpkg --configure -a || stage_fail 'dpkg --configure -a kept failing: the dpkg database needs a hand (see the journal)'
-  with_lock_retries apt_get update || stage_fail 'apt-get update kept failing for 5 min (see the journal)'
+  with_lock_retries 'dpkg --configure -a' dpkg --configure -a
+  with_lock_retries 'apt-get update' apt_get update
   # shellcheck disable=SC2086  # the list is one word per package
-  with_lock_retries apt_get -y install $PACKAGES || stage_fail 'apt-get install kept failing for 5 min (see the journal)'
+  with_lock_retries 'apt-get install' apt_get -y install $PACKAGES
   echo "$(wc -w <<< "$PACKAGES" | tr -d ' ') packages installed" >&3
 }
 
@@ -1004,9 +1065,13 @@ cmd_progress_reset() {
 }
 
 # cmd_progress — the Mac's poll: the progress file, then the unit's state
-cmd_progress() {
+cmd_progress() { progress_report "$(unit_show)"; }
+
+# progress_report <unit_show text> — the progress file, then the provision
+# unit's "unit <ActiveState> <Result>" line
+progress_report() {
   [[ ! -f $PROGRESS_FILE ]] || cat "$PROGRESS_FILE"
-  printf 'unit %s %s\n' "$(unit_property ActiveState)" "$(unit_property Result)"
+  printf 'unit %s %s\n' "$(unit_state "$1" "$SERVICE" ActiveState)" "$(unit_state "$1" "$SERVICE" Result)"
 }
 
 # unit_property <property> [unit] -> its value (the provision unit by
@@ -1016,6 +1081,14 @@ unit_property() {
   value=$(systemctl show -p "$1" --value "${2:-$SERVICE}" 2>/dev/null) || value=''
   echo "${value:-unknown}"
 }
+
+# unit_show -> ActiveState and Result of every STATUS_UNITS unit, from one
+# `systemctl show`; nothing when systemctl fails
+# shellcheck disable=SC2086  # the list is one word per unit
+unit_show() { systemctl show -p ActiveState -p Result $STATUS_UNITS 2>/dev/null || true; }
+
+# unit_state <unit_show text> <unit> <ActiveState|Result> -> its value, or unknown
+unit_state() { show_value "$1" "$(unit_place "$2")" "$3"; }
 
 # cmd_status — read-only (the Mac's status relies on it): the progress, then
 # one "<key> <value>" line per idle fact (U4) and per guest fact, parsed by
@@ -1035,17 +1108,19 @@ unit_property() {
 #   console <line>                          an unverified guest's latest
 #                                           transcript lines, oldest first
 # The host holds no key for the guest, so it can only probe it: the Mac's
-# smoke check is what verifies it.
+# smoke check is what verifies it. Every unit fact comes from one
+# `systemctl show` (unit_show).
 cmd_status() {
-  local domain lease verified=no line
-  cmd_progress
-  idle_facts
+  local show domain lease verified=no line
+  show=$(unit_show)
+  progress_report "$show"
+  idle_facts "$show"
   [[ ! -f $GUEST_VERIFIED ]] || verified=$(record_line "$(cat "$GUEST_VERIFIED")")
   echo "verified $verified"
   echo "pushed $(pushed_line)"
   domain=$(domain_state)
   echo "domain $domain"
-  echo "create $(unit_property ActiveState "$CREATE_UNIT")"
+  echo "create $(unit_state "$show" "$CREATE_UNIT" ActiveState)"
   lease=$(guest_lease)
   echo "lease ${lease:-none}"
   if [[ -n $lease && $domain == running ]] && port22_open "$lease"; then echo 'sshd open'; else echo 'sshd closed'; fi
@@ -1055,14 +1130,14 @@ cmd_status() {
   done <<< "$(transcript_lines "$TRANSCRIPT_LINES")"
 }
 
-# idle_facts — status's idle lines (cmd_status), from reads only
+# idle_facts <unit_show text> — status's idle lines (cmd_status), from reads only
 idle_facts() {
   local now
   now=$(date +%s 2>/dev/null) || now='?'
-  echo "idle $(unit_property ActiveState "$IDLE_TIMER") $(unit_property Result "$IDLE_SERVICE")"
+  echo "idle $(unit_state "$1" "$IDLE_TIMER" ActiveState) $(unit_state "$1" "$IDLE_SERVICE" Result)"
   echo "idle-run $(idle_record_read)"
   echo "inhibit $(inhibit_state "$now" "$(inhibit_read)")"
-  echo "deadman $(unit_property ActiveState "$DEADMAN_TIMER")"
+  echo "deadman $(unit_state "$1" "$DEADMAN_TIMER" ActiveState)"
 }
 
 # record_line <record text> -> "<pin> <sizing>"
@@ -1258,7 +1333,7 @@ main() {
     provision)      cmd_provision ;;
     progress-reset) cmd_progress_reset ;;
     progress)       cmd_progress ;;
-    journal)        cmd_journal "${2:-20}" ;;
+    journal)        cmd_journal "${2:-}" ;;
     status)         cmd_status ;;
     guest-verified) cmd_guest_verified ;;
     guest-abandon)  cmd_guest_abandon ;;

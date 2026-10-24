@@ -16,7 +16,8 @@
 # Safety: no test may reach AWS, a host or the network. tests/stubs goes
 # first on PATH, and the run refuses to start unless every network tool the
 # command could run resolves there: aws, curl, ssh, ssh-keyscan, and scp
-# (a tripwire: helios-lab never uses it). As a second net, AWS config and
+# (a tripwire: helios-lab never uses it). sleep resolves there too, so no
+# retry or poll waits its real 10 s. As a second net, AWS config and
 # credential files point at /dev/null and every AWS_* credential variable is
 # unset, so even a stray real CLI could not authenticate.
 set -euo pipefail
@@ -35,9 +36,9 @@ export PATH="$TESTS_DIR/stubs:$PATH"
 export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_EC2_METADATA_DISABLED=true
 unset AWS_PROFILE AWS_DEFAULT_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
   AWS_REGION AWS_DEFAULT_REGION HELIOS_LAB_PROFILE HELIOS_LAB_INSTANCE_TYPE HELIOS_LAB_IDLE_MINUTES \
-  HELIOS_LAB_RETRY_SECONDS HELIOS_LAB_HOST_ROOT SSH_AUTH_SOCK
+  HELIOS_LAB_HOST_ROOT SSH_AUTH_SOCK
 
-for tool in aws curl ssh ssh-keyscan scp; do
+for tool in aws curl ssh ssh-keyscan scp sleep; do
   [[ $(command -v "$tool") == "$TESTS_DIR/stubs/$tool" ]] \
     || die "refusing to run: $tool resolves to $(command -v "$tool"), not the stub"
 done

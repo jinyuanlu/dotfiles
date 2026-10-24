@@ -41,10 +41,7 @@
 #   HELIOS_LAB_IDLE_MINUTES   idle minutes before the host stops itself (default: 60)
 # HELIOS_LAB_STATE_DIR (state dir) is also the way out when the default one's
 # path holds characters ssh's ProxyJump can't carry (up says so).
-# For tests: HELIOS_LAB_HOME (library dir), HELIOS_LAB_STATE_DIR (state dir),
-# HELIOS_LAB_RETRY_SECONDS (wait between attempts of every retry and poll:
-# security-group delete, console fingerprints, host key, provision progress;
-# default 10).
+# For tests: HELIOS_LAB_HOME (library dir), HELIOS_LAB_STATE_DIR (state dir).
 #
 set -euo pipefail
 
@@ -63,6 +60,21 @@ die() {
   shift
   for hint in "$@"; do printf '  %s\n' "$hint" >&2; done
   exit "$code"
+}
+
+# attempt <command> [args...] -> an Either, told apart by the exit status: 0
+# with the command's stdout, or the command's own status with its stderr (on
+# stdout, so the caller can classify it). stdin passes through. Every aws
+# call (lib/aws.sh aws_attempt) and every ssh call (lib/remote.sh
+# ssh_capture) whose failure can be an answer goes through here.
+attempt() {
+  local errf out rc=0
+  errf=$(mktemp "${TMPDIR:-/tmp}/helios-lab.XXXXXX") || return 1
+  out=$("$@" 2>"$errf") || rc=$?
+  (( rc == 0 )) || out=$(<"$errf")
+  rm -f "$errf"
+  printf '%s' "$out"
+  return "$rc"
 }
 
 # --- Libraries ---------------------------------------------------------------
@@ -100,7 +112,9 @@ readonly ENGVM_PIN=8ef18ef53d3baa03eebe5f2238a3a4ceef1b6f4a
 # destroy retries the group delete for 12 x 10 s: a terminated instance's ENI
 # can hold the group for a minute or two.
 readonly SG_DELETE_ATTEMPTS=12
-readonly RETRY_SECONDS="${HELIOS_LAB_RETRY_SECONDS:-10}"
+# The wait between attempts of every retry and poll: the security-group
+# delete, console fingerprints, host key, provision progress and the guest.
+readonly RETRY_SECONDS=10
 
 # validate_config — fail fast on a bad knob, before any AWS call
 validate_config() {
@@ -109,8 +123,6 @@ validate_config() {
     "use a non-metal size of one of: $(nested_virt_families)"
   idle_minutes_ok "$IDLE_MINUTES" || die "$EX_USAGE" \
     "HELIOS_LAB_IDLE_MINUTES=$IDLE_MINUTES is not a multiple of 5 between 5 and 720"
-  [[ $RETRY_SECONDS =~ ^[0-9]{1,3}$ ]] || die "$EX_USAGE" \
-    "HELIOS_LAB_RETRY_SECONDS=$RETRY_SECONDS is not a whole number of seconds"
 }
 
 # --- Lock and exit notice ----------------------------------------------------
@@ -123,7 +135,8 @@ readonly SHLOCK=/usr/bin/shlock
 readonly LOCK_FILE="$STATE_DIR/lock"
 
 # lock_acquire — the traps go first, so the lock can't outlive this process
-# even if a signal lands right after it is taken
+# even if a signal lands right after it is taken. They are installed once,
+# here, and never rewritten: the notice they print comes from the notice file.
 lock_acquire() {
   [[ -x $SHLOCK ]] || die "$EX_FAIL" "$SHLOCK not found: helios-lab locks with macOS's shlock"
   state_dir_ensure
@@ -134,7 +147,7 @@ lock_acquire() {
   "$SHLOCK" -p "$$" -f "$LOCK_FILE" || die "$EX_CONFLICT" \
     "another helios-lab up, stop or destroy is running (pid $(cat "$LOCK_FILE" 2>/dev/null || echo unknown))" \
     'wait for it to finish; once that process is gone, the next run takes the lock over'
-  rm -f "$NOTICE_FILE"   # a killed run's, whose pid this one reuses
+  rm -f "$NOTICE_FILE" "$NOTICE_FILE.new"   # a killed run's, whose pid this one reuses
 }
 
 # state_dir_ensure — the state dir holds the lock, the ssh fragment and the
@@ -148,39 +161,38 @@ lock_release() {
   if [[ $(cat "$LOCK_FILE" 2>/dev/null) == "$$" ]]; then rm -f "$LOCK_FILE"; fi
 }
 
-# on_exit [<instance-id|""> <type> <launch-epoch> <stop> <idle-minutes>] —
-# the EXIT trap. Once up holds a host that may be billing (arm_notice), a
-# failure or Ctrl-C prints the billing notice; then the lock goes. set +e
-# because a failing command in an EXIT trap would replace the exit status.
-# The stop it names is <stop>, unless this up's push has since handed the
-# stop to the idle timer (notice_signal).
+# on_exit — the EXIT trap. Once up holds a host that may be billing
+# (notice_set), a failure or Ctrl-C prints the billing notice the notice
+# file holds; then the file and the lock go. set +e because a failing
+# command in an EXIT trap would replace the exit status.
 on_exit() {
-  local rc=$? pushed
+  local rc=$? id type launch stop
   set +e
-  if (( $# > 0 )) && notice_due "$rc" "$1"; then
-    pushed=$(cat "$NOTICE_FILE" 2>/dev/null)
-    billing_notice "$1" "$2" "$3" "${pushed:-$4}" "$5" >&2
+  if [[ -f $NOTICE_FILE ]] && IFS=$US read -r id type launch stop < "$NOTICE_FILE" && notice_due "$rc" "$id"; then
+    billing_notice "$id" "$type" "$launch" "$stop" "$IDLE_MINUTES" >&2
   fi
-  rm -f "$NOTICE_FILE"
+  rm -f "$NOTICE_FILE" "$NOTICE_FILE.new"
   lock_release
 }
 
-# arm_notice <instance-id|""> <type> <launch-epoch|""> <stop> — from here on,
+# notice_set <instance-id|""> <type> <launch-epoch|""> <stop> — from here on,
 # a failure or Ctrl-C says the host is billing, and which stop is armed
 # (state.sh armed_stop: deadman, idle or either). "" means a launch or start
-# call is in flight. The values are quoted into the trap now, on purpose.
-# shellcheck disable=SC2064
-arm_notice() { trap "on_exit $(printf '%q ' "$@" "$IDLE_MINUTES")" EXIT; }
-
-# notice_signal <stop> — once this up's push has armed the idle timer (and
-# disarmed the dead-man timer), the billing notice names that stop, for the
-# rest of this up (a later restart boots with it armed too). up_connect runs
-# in a subshell, which has no traps and can't set this shell's, and a Ctrl-C
-# ends both before either could pass a value back, so it is a file beside
-# the lock, named for this process ($$ is the same in the subshell) and
-# removed with it. Best effort: the state dir held the lock a moment ago.
-readonly NOTICE_FILE="$STATE_DIR/stop.$$"
-notice_signal() { printf '%s\n' "$1" > "$NOTICE_FILE" 2>/dev/null || true; }
+# call is in flight. The notice file beside the lock is the only channel to
+# the trap: up converges and connects in subshells, which can't set this
+# shell's traps, and a Ctrl-C ends both before either could pass a value
+# back. It is named for this process ($$ is the same in a subshell),
+# replaced atomically (a reader never sees half a notice), and removed with
+# the lock. Best effort: the state dir held the lock a moment ago.
+# Once this up's push has armed the idle timer, the notice names it for the
+# rest of this up (state.sh notice_stop): a later restart boots with it armed.
+readonly NOTICE_FILE="$STATE_DIR/notice.$$"
+notice_set() {
+  local id type launch was=''
+  [[ ! -f $NOTICE_FILE ]] || IFS=$US read -r id type launch was < "$NOTICE_FILE" || was=''
+  { printf '%s\n' "$1$US$2$US$3$US$(notice_stop "$was" "$4")" > "$NOTICE_FILE.new" \
+      && mv -f "$NOTICE_FILE.new" "$NOTICE_FILE"; } 2>/dev/null || true
+}
 
 # notice_due <exit-status> <instance-id|""> -> 0 when the notice must print.
 # A known host: on any failure. A call in flight: only when its outcome is
@@ -199,10 +211,10 @@ notice_due() {
 # lab_key_fingerprint -> the key's SHA256 fingerprint, or nothing when either
 # half is missing or unreadable (state.sh lab_key_verdict says "missing")
 lab_key_fingerprint() {
-  local line
+  local pub
   [[ -f $LAB_KEY && -f $LAB_KEY.pub ]] || return 0
-  line=$(ssh-keygen -lf "$LAB_KEY.pub" 2>/dev/null) || return 0
-  fingerprint_of "$line" || return 0
+  pub=$(cat "$LAB_KEY.pub" 2>/dev/null) || return 0
+  key_fingerprint "$pub" || return 0
 }
 
 # lab_key_require_pub — the private half alone is not lost: say how to rebuild the public half
@@ -229,16 +241,16 @@ lab_key_ensure() {
   echo "back up $LAB_KEY: the guest accepts only this key, and helios-lab never regenerates it"
 }
 
-# lab_key_check <instance-id> — the key must be the one the instance was created with
+# lab_key_check <instance-id> <its KeyFingerprint tag|None> — the key must be
+# the one the instance was created with (the tag comes with discovery's row)
 lab_key_check() {
-  local tag fp
-  tag=$(aws_instance_key_tag "$1")
+  local fp
   lab_key_require_pub
   fp=$(lab_key_fingerprint)
-  case $(lab_key_verdict "$fp" "$tag") in
+  case $(lab_key_verdict "$fp" "$2") in
     ok)       return 0 ;;
     missing)  key_lost "the lab key $LAB_KEY is missing, and lab instance $1 exists" ;;
-    mismatch) key_lost "the lab key $LAB_KEY ($fp) is not the key $1 was created with (${tag/#None/no KeyFingerprint tag})" ;;
+    mismatch) key_lost "the lab key $LAB_KEY ($fp) is not the key $1 was created with (${2/#None/no KeyFingerprint tag})" ;;
   esac
 }
 
@@ -294,8 +306,8 @@ status_absent() {
 # auto-stop field is the host's own: a keep's deadline, the idle countdown,
 # or the dead-man time while that is the stop armed (probe_autostop).
 status_one() {
-  local id state type az ip launch group code reason now deadman access='' probe=''
-  IFS=$US read -r id state type az ip launch group code reason <<< "$1"
+  local id state type az ip launch group code reason tag now deadman access='' probe=''
+  IFS=$US read -r id state type az ip launch group code reason tag <<< "$1"
   now=$(date +%s)
   deadman=$(deadman_epoch "$(launch_epoch "$launch" "$now")")
   if [[ $state == running ]]; then
@@ -327,7 +339,7 @@ status_anomalies() {
 # rule matter. A failed IP lookup is itself an anomaly (unknown).
 caller_access() {
   local ip rules
-  [[ $1 != None && -n $1 ]] || { echo none; return 0; }
+  present "$1" || { echo none; return 0; }
   ip=$(caller_ip) || { echo unknown; return 0; }
   rules=$(aws_ingress_rules "$1") || return
   if ingress_allows "$ip" "$rules"; then echo allowed; else echo "denied $ip"; fi
@@ -346,29 +358,43 @@ guest_headline_field() {
 }
 
 # --- up ----------------------------------------------------------------------
-# Converges from any EC2 state to "host running" by the state machine in
-# state.sh (up_action), then bootstraps the host and boots the guest
-# (up_connect). -v adds the host's provisioning journal. UP_VERBOSE and
-# UP_STARTED (for the ready screen's elapsed time) are set once, here, and
-# only read.
+# Converges from any EC2 state to "host running" (up_converge), then
+# bootstraps the host and boots the guest (up_connect_following). -v adds the
+# host's provisioning journal. UP_VERBOSE and UP_STARTED (for the ready
+# screen's elapsed time) are set once, here, and only read.
 cmd_up() {
-  local mode started
+  local mode started row
   mode=$(up_mode "$@")
   started=$(date +%s)
   readonly UP_VERBOSE=$mode UP_STARTED=$started
   require_jump_safe
   lock_acquire
-  local row id state type az ip launch rest
   row=$(discover_single)
-  IFS=$US read -r id state type az ip launch rest <<< "$row"
+  { row=$(set -e; up_converge "$row" 3>&1 1>&4); } 4>&1
+  up_connect_following "$row"
+}
+
+# up_converge <row> — the state machine in state.sh (up_action), from the
+# state discovery found to "host running": the one copy of its dispatch.
+# Its progress goes to stdout, and the running row, once the host runs and
+# any re-lookup has passed, to fd 3, so callers capture only the row and
+# the progress still streams:
+#   { row=$(set -e; up_converge "$row" 3>&1 1>&4); } 4>&1
+# That runs it in a subshell, so it arms the billing notice through the
+# notice file (notice_set), and sets errexit there: bash 3.2 runs $(...)
+# without it.
+up_converge() {
+  local id state type az ip launch rest
+  IFS=$US read -r id state type az ip launch rest <<< "$1"
   case $(up_action "${state:-absent}") in
     create)           up_create ;;
     wait-then-create) up_wait "$id" instance-terminated terminating; up_create ;;
-    start)            up_existing "$row"; up_start "$id" "$type" "$az" ;;
-    wait-then-start)  up_existing "$row"; up_wait "$id" instance-stopped stopping; up_start "$id" "$type" "$az" ;;
-    none)             up_existing "$row"
-                      arm_notice "$id" "$type" "$(launch_epoch "$launch" "$(date +%s)")" either
+    start)            up_existing "$1"; up_start "$id" "$type" "$az" ;;
+    wait-then-start)  up_existing "$1"; up_wait "$id" instance-stopped stopping; up_start "$id" "$type" "$az" ;;
+    wait)             up_existing "$1"
+                      notice_set "$id" "$type" "$(launch_epoch "$launch" "$(date +%s)")" either
                       up_running "$id" '' either ;;
+    none)             up_existing "$1"; up_arrived "$1" either ;;
   esac
 }
 
@@ -391,23 +417,23 @@ up_wait() {
 # must be the lab key, the type override can't apply, and the group admits
 # exactly this Mac (the ingress refresh every connecting command runs)
 up_existing() {
-  local id state type az ip launch group rest note
-  IFS=$US read -r id state type az ip launch group rest <<< "$1"
-  lab_key_check "$id"
+  local id state type az ip launch group code reason tag note
+  IFS=$US read -r id state type az ip launch group code reason tag <<< "$1"
+  lab_key_check "$id" "$tag"
   note=$(type_override_note "${HELIOS_LAB_INSTANCE_TYPE:-}" "$type" "$id")
   [[ -z $note ]] || warn "$note"
-  [[ -n $group && $group != None ]] || die "$EX_FAIL" "$id has no security group" 'helios-lab status shows the details'
-  ingress_refresh "$group"
+  ingress_refresh "$id" "$group"
 }
 
-# ingress_refresh <group-id> — the first step of every connecting command
-# (R10): ingress becomes exactly this Mac's /32 on tcp/22 (one line when that
-# changes), egress exactly tcp 80/443. up runs it before any start; U3's ssh
-# and console run it, then host_reach (lib/remote.sh).
+# ingress_refresh <instance-id> <group-id|None> — the first step of every
+# connecting command (R10): ingress becomes exactly this Mac's /32 on tcp/22
+# (one line when that changes), egress exactly tcp 80/443. up runs it before
+# any start; U3's ssh and console run it, then host_reach (lib/remote.sh).
 ingress_refresh() {
   local caller
+  present "$2" || die "$EX_FAIL" "$1 has no security group" 'helios-lab status shows the details'
   caller=$(caller_ip_or_die)
-  sg_converge "$1" "$caller"
+  sg_converge "$2" "$caller"
 }
 
 # up_create — absent: preflight (the cost line before the dry-run), the lab
@@ -485,45 +511,54 @@ up_launch() {
   user_data=$(render_user_data "$(cat "$LAB_KEY.pub")") \
     || die "$EX_FAIL" "$LAB_KEY.pub is not an ed25519 public key"
   started=$(date +%s)
-  arm_notice '' "$INSTANCE_TYPE" '' deadman
+  notice_set '' "$INSTANCE_TYPE" '' deadman
   launched=$(aws_launch "$INSTANCE_TYPE" "$subnet" "$az" "$2" "$3" "$user_data")
   IFS=$US read -r id launch <<< "$launched"
-  arm_notice "$id" "$INSTANCE_TYPE" "$(launch_epoch "$launch" "$started")" deadman
+  notice_set "$id" "$INSTANCE_TYPE" "$(launch_epoch "$launch" "$started")" deadman
   echo "instance $id launched in $az · waiting for running"
   up_running "$id" "$started" deadman
 }
 
-# up_start <instance-id> <type> <az> [connect] — [connect] as up_running's.
-# An existing host: which stop is armed depends on whether an earlier up
-# finished its push, so the notice says either until this up's push.
+# up_start <instance-id> <type> <az> — an existing host: which stop is armed
+# depends on whether an earlier up finished its push, so the notice says
+# either until this up's push.
 up_start() {
   local started
   started=$(date +%s)
   echo "starting $1 · billing resumes at $(hourly_cost "$2")"
-  arm_notice '' "$2" '' either
+  notice_set '' "$2" '' either
   aws_start "$1" "$2" "$3"
-  arm_notice "$1" "$2" "$started" either
-  up_running "$1" "$started" either "${4:-up_connect_following}"
+  notice_set "$1" "$2" "$started" either
+  up_running "$1" "$started" either
 }
 
-# up_running <instance-id> <started-epoch|""> <stop> [connect] — wait for
-# running, then the post-launch re-lookup, then connect: up_connect_following,
-# unless a caller that already followed a stop names plain up_connect. <stop>
-# is the stop armed until this up's push (state.sh armed_stop). Invariant: at
-# most one live tagged instance; a duplicate (another Mac's concurrent up,
-# say) exits 4 and is never resolved automatically.
+# up_running <instance-id> <started-epoch|""> <stop> — wait for running,
+# then the post-launch re-lookup. <stop> is the stop armed until this up's
+# push (state.sh armed_stop). Invariant: at most one live tagged instance; a
+# duplicate (another Mac's concurrent up, say) exits 4 and is never
+# resolved automatically.
 up_running() {
   aws_wait instance-running --instance-ids "$1"
-  local row id state type az ip launch rest boot
+  local row id state rest
   row=$(discover_single)
-  IFS=$US read -r id state type az ip launch rest <<< "$row"
+  IFS=$US read -r id state rest <<< "$row"
   [[ $id == "$1" && $state == running ]] || die "$EX_CONFLICT" \
     "after waiting for $1 to run, discovery found: $(instance_list "$row")" 'helios-lab status shows the details'
-  boot=$(launch_epoch "$launch" "$(date +%s)")
-  arm_notice "$id" "$type" "$boot" "$3"
   [[ -z $2 ]] || echo "instance $id running · $(fmt_elapsed $(( $(date +%s) - $2 )))"
-  running_line "$id" "$ip" "$type" "$(deadman_epoch "$boot")" "$3"
-  "${4:-up_connect_following}" "$row"
+  up_arrived "$row" "$3"
+}
+
+# up_arrived <running row> <stop> — the host runs: the notice names its boot
+# and <stop>, the running line, then the row goes out on fd 3 (up_converge).
+# A host that was already running when up began comes straight here: no
+# waiter, and no re-lookup, which only a launch or start needs.
+up_arrived() {
+  local id state type az ip launch rest boot
+  IFS=$US read -r id state type az ip launch rest <<< "$1"
+  boot=$(launch_epoch "$launch" "$(date +%s)")
+  notice_set "$id" "$type" "$boot" "$2"
+  running_line "$id" "$ip" "$type" "$(deadman_epoch "$boot")" "$2"
+  printf '%s\n' "$1" >&3
 }
 
 # up_connect_following <row> — up_connect, and when ssh to the host fails on
@@ -541,24 +576,24 @@ up_connect_following() {
   set -e
   (( rc != 0 )) || return 0
   (( rc == EX_NET )) || exit "$rc"
-  up_follow_stop "$1" "$rc"
+  up_follow_stop "$rc"
 }
 
-# up_follow_stop <row> <exit status> — a host found stopping or stopped is
-# named, waited out and started again, then connected once more, without a
-# second follow. Anything else (still running, gone) keeps the ssh failure,
-# already reported, and its exit status.
+# up_follow_stop <exit status> — a host found stopping or stopped is named,
+# then up converges again from that state (waited out, started) and
+# connects once more, without a second follow. Anything else (still
+# running, gone) keeps the ssh failure, already reported, and its exit status.
 up_follow_stop() {
-  local row id state type az ip launch group code reason
+  local row id state type az ip launch group code reason tag
   row=$(discover_single)
-  IFS=$US read -r id state type az ip launch group code reason <<< "$row"
+  IFS=$US read -r id state type az ip launch group code reason tag <<< "$row"
   case $(up_action "${state:-absent}") in
-    wait-then-start) echo "$(stopped_while_connecting "$id" "$code" "$reason") · up follows it"
-                     up_wait "$id" instance-stopped stopping ;;
-    start)           echo "$(stopped_while_connecting "$id" "$code" "$reason") · up follows it" ;;
-    *)               exit "$2" ;;
+    start|wait-then-start) ;;
+    *)                     exit "$1" ;;
   esac
-  up_start "$id" "$type" "$az" up_connect
+  echo "$(stopped_while_connecting "$id" "$code" "$reason") · up follows it"
+  { row=$(set -e; up_converge "$row" 3>&1 1>&4); } 4>&1
+  up_connect "$row"
 }
 
 # up_connect <row> — the host bootstrap (U2), then the guest (U3). Runs once
@@ -573,14 +608,14 @@ up_follow_stop() {
 # Invariant: from launch onward every boot has a stop armed. The push's
 # install arms the idle timer before it disarms the dead-man timer, and dies
 # otherwise, so once host_push returns the idle timer is the stop armed, and
-# the notice says so from then on (notice_signal).
+# the notice says so from then on (notice_set, state.sh notice_stop).
 up_connect() {
   local id state type az ip launch rest pushed reply
   IFS=$US read -r id state type az ip launch rest <<< "$1"
   host_reach "$id" "$ip"
   pushed=$(host_push) || return
   push_line
-  notice_signal idle
+  notice_set "$id" "$type" "$(launch_epoch "$launch" "$(date +%s)")" idle
   provision_start
   provision_follow "$pushed"
   [[ ${UP_VERBOSE:-quiet} != verbose ]] || provision_journal_print
@@ -638,13 +673,12 @@ cmd_console() {
 # instance must be running; then the steps every connecting command takes
 # before its first ssh
 connect_running() {
-  local row id state type az ip launch group code reason
+  local row id state type az ip launch group code reason tag
   row=$(discover_single)
-  IFS=$US read -r id state type az ip launch group code reason <<< "$row"
+  IFS=$US read -r id state type az ip launch group code reason tag <<< "$row"
   [[ $state == running ]] || die "$EX_FAIL" "$(not_running_message "${state:-absent}" "$id" "$code" "$reason")" "$1"
-  lab_key_check "$id"
-  [[ -n $group && $group != None ]] || die "$EX_FAIL" "$id has no security group" 'helios-lab status shows the details'
-  ingress_refresh "$group"
+  lab_key_check "$id" "$tag"
+  ingress_refresh "$id" "$group"
   host_reach "$id" "$ip"
 }
 

@@ -22,7 +22,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 readonly RUNNING=$DERIVED/describe-instances.running.discover.txt
 readonly STOPPED_IDLE=$DERIVED/describe-instances.stopped-idle.discover.txt
 readonly STOPPED_USER=$DERIVED/describe-instances.stopped-user.discover.txt
-readonly KEY_TAG=$DERIVED/describe-instances.running.key-tag.txt
 readonly ROOT_VOLUMES=$DERIVED/describe-instances.running.root-volumes.txt
 readonly CALLER=$DERIVED/sts-get-caller-identity.caller.txt
 readonly VPC=$DERIVED/describe-vpcs.default.vpc.txt
@@ -125,8 +124,7 @@ world_absent() {
 # tag is the test key's; a converged group; this Mac at the converged IP
 world_existing() {
   lab_key
-  reply_seq ec2-describe-instances 1 "$1"
-  set_field 1 "$(lab_fp)" < "$KEY_TAG" | reply ec2-describe-instances.2
+  tagged < "$1" | reply ec2-describe-instances.1
   reply ec2-describe-instances "$RUNNING"           # the re-lookup once running
   reply ec2-describe-security-group-rules "$RULES_CONVERGED"
   sg_writes_ok
@@ -416,7 +414,8 @@ test_up_stopped_starts_only_and_says_billing_resumes() {
   assert_eq 0 "$(count_of run-instances)" 'no launch, no dry-run'
   assert_eq 0 "$(calls | grep -cE '^aws ec2 (create|authorize|revoke|modify|terminate)-' || true)" 'other writes'
   assert_eq 0 "$(grep -c -- '--version' "$STUB_LOG" || true)" 'no preflight off the create path'
-  assert_contains "$(calls)" "aws ec2 describe-instances --instance-ids $LAB_ID --query Reservations[].Instances[].[Tags[?Key=='KeyFingerprint'].Value | [0]]"
+  # The lab key is checked against the tag discovery's row carries: no call of its own.
+  assert_eq 2 "$(count_of describe-instances)" 'discovery and the re-lookup, nothing more'
   assert_no_lock
 }
 
@@ -426,6 +425,9 @@ test_up_running_converged_makes_no_write_and_no_group_line() {
   run_cli up
   assert_rc 0
   assert_no_mutation
+  # Already running: no waiter, and no re-lookup (only a launch or start needs one).
+  assert_eq 0 "$(count_of wait)" 'waiter calls'
+  assert_eq 1 "$(count_of describe-instances)" 'discovery only'
   assert_contains "$(calls)" "aws ec2 describe-security-group-rules --filters Name=group-id,Values=$LAB_GROUP --query SecurityGroupRules[].[SecurityGroupRuleId,IsEgress,IpProtocol,FromPort,ToPort,CidrIpv4]"
   # An existing host: which stop is armed is the push's to say (U4), not this line's.
   assert_line 1 "host running · $LAB_ID · $FIXTURE_IP · ≈\$0.27/hr"
@@ -462,7 +464,7 @@ test_a_new_caller_ip_replaces_the_rule_with_one_line() {
 
 test_up_stopping_waits_for_stopped_then_starts() {
   world_existing "$STOPPED_USER"
-  set_field "$COL_STATE" stopping < "$STOPPED_USER" | reply ec2-describe-instances.1
+  set_field "$COL_STATE" stopping < "$STOPPED_USER" | tagged | reply ec2-describe-instances.1
   run_cli up
   assert_rc 0
   assert_contains "$OUT" "waiting for $LAB_ID to finish stopping"
@@ -510,7 +512,7 @@ test_a_lab_key_that_is_not_the_instances_is_the_same_failure() {
   local before tag
   before=$(lab_fp)
   for tag in "$OTHER_FP" None; do   # None: an instance without the tag (the captures have none)
-    set_field 1 "$tag" < "$KEY_TAG" | reply ec2-describe-instances.2
+    set_field "$COL_TAG" "$tag" < "$STOPPED_IDLE" | reply ec2-describe-instances.1
     rm -rf "$STUB_AWS_DIR/.calls"
     run_cli up
     assert_rc 4
@@ -604,15 +606,25 @@ test_ctrl_c_after_launch_prints_the_notice_and_releases_the_lock() {
   assert_no_lock
 }
 
-# interrupted_after_launch — take the lock, arm the notice as up does after a
-# launch, then deliver SIGINT to this very subshell (bash 3.2 has no
+# interrupted_after_launch — take the lock, set the notice as up does after
+# a launch, then deliver SIGINT to this very subshell (bash 3.2 has no
 # $BASHPID: an exec'd sh's parent is this shell)
 interrupted_after_launch() {
   lock_acquire
-  arm_notice "$LAB_ID" m8i.xlarge "$LAUNCH_EPOCH" deadman
+  notice_set "$LAB_ID" m8i.xlarge "$LAUNCH_EPOCH" deadman
   # shellcheck disable=SC2016  # $PPID is the sh's own
   kill -INT "$(exec sh -c 'echo $PPID')"
   echo 'not interrupted'
+}
+
+test_a_notice_only_ever_moves_on_to_the_idle_timer() {
+  load_cli
+  local spec was now want
+  for spec in '|deadman|deadman' '|either|either' 'deadman|either|either' 'either|idle|idle' \
+              'idle|either|idle' 'idle|deadman|idle' 'idle|idle|idle'; do
+    IFS='|' read -r was now want <<< "$spec"
+    assert_eq "$want" "$(notice_stop "$was" "$now")" "notice_stop '$was' $now"
+  done
 }
 
 test_notice_due_table() {
@@ -676,10 +688,10 @@ test_a_dead_holders_lock_is_taken_over_and_released() {
   no_lab
   mkdir -p "$HELIOS_LAB_STATE_DIR"
   local dead
-  sleep 0 & dead=$!
+  /bin/sleep 0 & dead=$!
   wait "$dead"
   echo "$dead" > "$HELIOS_LAB_STATE_DIR/lock"
-  sleep 1.1   # shlock won't break a lock written in the current second
+  /bin/sleep 1.1   # shlock won't break a lock written in the current second (the stub sleep won't wait)
   run_cli stop
   assert_rc 0
   assert_eq 'absent · no lab instance · nothing to stop' "$OUT"
@@ -794,7 +806,8 @@ test_destroy_yes_deletes_an_orphan_group_retrying_a_dependency_violation() {
   assert_line 2 "  group     $LAB_GROUP (security group)"
   assert_not_contains "$OUT" 'guest disk'   # no instance, nothing of the guest to lose
   assert_eq 2 "$(count_of delete-security-group)" 'delete attempts'
-  assert_contains "$OUT" "security group $LAB_GROUP still in use; retrying in 0s"
+  assert_contains "$OUT" "security group $LAB_GROUP still in use; retrying in 10s"
+  assert_eq 'sleep 10' "$(grep '^sleep ' "$STUB_LOG")" 'one wait, of RETRY_SECONDS'
   assert_contains "$OUT" "security group $LAB_GROUP deleted"
   assert_eq 0 "$(count_of terminate-instances)" 'no instance to terminate'
   [[ -f $(lab_key_path) && -f $(lab_key_path).pub ]] || fail 'destroy touched the lab key'
@@ -903,6 +916,17 @@ test_user_data_carries_the_key_printer_and_dead_man_and_no_secret() {
     assert_not_contains "$(calls)" "$secret"
   done
   (( $(printf '%s' "$ud" | wc -c) < 16384 )) || fail 'user-data is over its 16 KB limit'
+}
+
+# The dead-man timer user-data arms and the time every lifecycle message
+# names for it (state.sh deadman_epoch) are one fact, written twice.
+# shellcheck disable=SC2153  # DEADMAN_S comes from lib/state.sh, through load_cli
+test_the_user_data_dead_man_fires_when_the_lifecycle_messages_say() {
+  load_cli
+  local boot
+  boot=$(render_user_data "$PLACEHOLDER_PUBKEY" | sed -n 's/^ *OnBootSec=//p')
+  [[ $boot =~ ^[1-9][0-9]*h$ ]] || fail "expected one OnBootSec in whole hours, got: $boot"
+  assert_eq "$DEADMAN_S" $(( ${boot%h} * 3600 )) "state.sh's DEADMAN_S vs the timer's OnBootSec=$boot"
 }
 
 test_render_user_data_accepts_only_an_ed25519_public_key() {
@@ -1096,7 +1120,6 @@ test_costs_and_lifecycle_lines() {
 # shellcheck disable=SC2153  # Q_* come from lib/aws.sh, through load_cli
 test_queries_are_pinned() {
   load_cli
-  assert_eq "Reservations[].Instances[].[Tags[?Key=='KeyFingerprint'].Value | [0]]" "$Q_KEY_TAG"
   assert_eq 'Reservations[].Instances[].BlockDeviceMappings[].Ebs.[VolumeId,DeleteOnTermination]' "$Q_ROOT_VOLUMES"
   assert_eq 'Volumes[].[VolumeId]' "$Q_VOLUME_IDS"
   assert_eq '[Account,Arn]' "$Q_CALLER"

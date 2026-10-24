@@ -24,7 +24,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # --- Fixtures ----------------------------------------------------------------
 readonly RUNNING=$DERIVED/describe-instances.running.discover.txt
 readonly STOPPED_IDLE=$DERIVED/describe-instances.stopped-idle.discover.txt
-readonly KEY_TAG=$DERIVED/describe-instances.running.key-tag.txt
 readonly RULES_CONVERGED=$DERIVED/describe-security-group-rules.converged.rules.txt
 readonly INGRESS=$DERIVED/describe-security-group-rules.converged.ingress.txt
 readonly KEYSCAN=$FIXTURES/ssh-keyscan.ed25519.txt
@@ -44,9 +43,7 @@ readonly SS_ARGS="ss -Htn state established ( sport = :22 )"
 # that come up cleanly (tests/lib.sh world_host_ok)
 world_running() {
   lab_key
-  reply_seq ec2-describe-instances 1 "$RUNNING"
-  set_field 1 "$(lab_fp)" < "$KEY_TAG" | reply ec2-describe-instances.2
-  reply ec2-describe-instances "$RUNNING"
+  tagged < "$RUNNING" | reply ec2-describe-instances
   reply ec2-describe-security-group-rules "$RULES_CONVERGED"
   reply ec2-wait < /dev/null
   caller_ip_is "$HOST_IP"
@@ -143,13 +140,25 @@ fake_idle_tools() {
 fake_show() {
   [[ ${FAKE_SHOW:-ok} == ok ]] || return 1
   case $2:$3:$4:$5 in
-    -p:ActiveState:--value:helios-lab-idle.timer)   echo "${FAKE_IDLE_TIMER:-active}" ;;
-    -p:Result:--value:helios-lab-idle.service)       echo "${FAKE_IDLE_RESULT:-success}" ;;
-    -p:ActiveState:--value:helios-lab-deadman.timer) echo "${FAKE_DEADMAN:-inactive}" ;;
-    -p:ActiveState:--value:*)                        echo inactive ;;
-    -p:Result:--value:*)                             echo success ;;
+    -p:ActiveState:-p:Result) fake_show_blocks "${@:6}" ;;   # status's, every unit at once
     *) printf 'ActiveState=%s\nActiveEnterTimestampMonotonic=%s\n' "${FAKE_PROVISION:-inactive}" "${FAKE_ENTER_US:-0}" ;;
   esac
+}
+
+# fake_show_blocks <unit>... — one KEY=value block per unit, one blank line apart
+# shellcheck disable=SC2329  # called by fake_show
+fake_show_blocks() {
+  local unit sep='' state result
+  for unit in "$@"; do
+    state=inactive result=success
+    case $unit in
+      helios-lab-idle.timer)    state=${FAKE_IDLE_TIMER:-active} ;;
+      helios-lab-idle.service)  result=${FAKE_IDLE_RESULT:-success} ;;
+      helios-lab-deadman.timer) state=${FAKE_DEADMAN:-inactive} ;;
+    esac
+    printf '%sActiveState=%s\nResult=%s\n' "$sep" "$state" "$result"
+    sep=$'\n'
+  done
 }
 
 # idle_run — one idle check as the timer runs it, in a subshell (it turns
@@ -557,15 +566,15 @@ normalize() { sed -E 's/[0-9]{10}/EPOCH/g'; }
 test_the_helpers_idle_lines_are_exactly_what_the_mac_parses() {
   local armed failed kept bare
   armed=$( host_env; fake_idle_tools; host_conf 60
-           FAKE_SESSIONS=1 idle_run; idle_facts )
+           FAKE_SESSIONS=1 idle_run; idle_facts "$(unit_show)" )
   fresh_host
   failed=$( host_env; fake_idle_tools; host_conf 60; record "$NOW increment 3 12"
-            FAKE_SS=fail idle_run; FAKE_IDLE_RESULT=exit-code idle_facts )
+            FAKE_SS=fail idle_run; FAKE_IDLE_RESULT=exit-code; idle_facts "$(unit_show)" )
   fresh_host
   kept=$( host_env; fake_idle_tools; host_conf 60
-          FAKE_SESSIONS=1 idle_run; cmd_keep 10800 > /dev/null; idle_facts )
+          FAKE_SESSIONS=1 idle_run; cmd_keep 10800 > /dev/null; idle_facts "$(unit_show)" )
   fresh_host
-  bare=$( host_env; fake_idle_tools; FAKE_IDLE_TIMER=inactive idle_facts )
+  bare=$( host_env; fake_idle_tools; FAKE_IDLE_TIMER=inactive; idle_facts "$(unit_show)" )
   assert_eq "$(idle_status_reply armed | normalize)" "$(normalize <<< "$armed")" 'armed'
   assert_eq "$(idle_status_reply failed | normalize)" "$(normalize <<< "$failed")" 'a failed check'
   assert_eq "$(idle_status_reply inhibited | normalize)" "$(normalize <<< "$kept")" 'a keep in force'
@@ -581,10 +590,9 @@ test_the_helpers_idle_lines_are_exactly_what_the_mac_parses() {
 test_the_helpers_status_reads_only() {
   local log
   log=$( host_env; fake_idle_tools; host_conf 60; record "$NOW increment 3 12"
-         idle_facts > /dev/null; tools_log )
-  assert_eq 'systemctl show -p ActiveState --value helios-lab-idle.timer
-systemctl show -p Result --value helios-lab-idle.service
-systemctl show -p ActiveState --value helios-lab-deadman.timer' "$log"
+         idle_facts "$(unit_show)" > /dev/null; tools_log )
+  assert_eq 'systemctl show -p ActiveState -p Result helios-lab-provision.service helios-lab-idle.timer helios-lab-idle.service helios-lab-deadman.timer helios-lab-create.service' \
+    "$log" 'one systemctl show, nothing else'
 }
 
 # --- Mac: keep ---------------------------------------------------------------
@@ -774,7 +782,7 @@ test_up_ends_with_the_keep_deadline_when_one_is_in_force() {
   assert_eq "  auto-stop inhibited until $(hhmm_utc "$(replied inhibit)"), then it stops after 60 min idle · helios-lab keep off clears it · helios-lab stop when done" \
     "$(tail -2 <<< "$OUT" | head -1)"
   [[ ! -e $HELIOS_LAB_STATE_DIR/lock ]] || fail 'the lock outlived up'
-  if compgen -G "$HELIOS_LAB_STATE_DIR/stop.*" > /dev/null; then fail 'the notice file outlived up'; fi
+  if compgen -G "$HELIOS_LAB_STATE_DIR/notice.*" > /dev/null; then fail 'the notice file outlived up'; fi
 }
 
 test_a_failure_after_the_push_says_the_idle_timer_is_the_stop() {
@@ -801,13 +809,16 @@ test_ctrl_c_after_the_push_names_the_idle_timer_and_leaves_nothing_behind() {
 }
 
 # pushed_then_interrupted — as up after a fresh launch: the lock, and the
-# notice armed for the dead-man timer; then the push's signal from a
-# subshell, as up_connect sends it; then SIGINT to this very shell (bash 3.2
-# has no $BASHPID: an exec'd sh's parent is this shell), mid-provisioning
+# notice set for the dead-man timer; then the push's notice from a subshell,
+# as up_connect sets it; then a later notice that knows only "either", as a
+# start after a followed stop sets it, which must not take the idle timer
+# back; then SIGINT to this very shell (bash 3.2 has no $BASHPID: an exec'd
+# sh's parent is this shell), mid-provisioning
 pushed_then_interrupted() {
   lock_acquire
-  arm_notice "$LAB_ID" m8i.xlarge 1792839039 deadman
-  ( notice_signal idle )
+  notice_set "$LAB_ID" m8i.xlarge 1792839039 deadman
+  ( notice_set "$LAB_ID" m8i.xlarge 1792839039 idle )
+  ( notice_set "$LAB_ID" m8i.xlarge 1792839039 either )
   # shellcheck disable=SC2016  # $PPID is the sh's own
   kill -INT "$(exec sh -c 'echo $PPID')"
   echo 'not interrupted'

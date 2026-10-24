@@ -23,7 +23,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # --- Fixtures ----------------------------------------------------------------
 readonly RUNNING=$DERIVED/describe-instances.running.discover.txt
-readonly KEY_TAG=$DERIVED/describe-instances.running.key-tag.txt
 readonly RULES_CONVERGED=$DERIVED/describe-security-group-rules.converged.rules.txt
 readonly CONSOLE_FIRST=$FIXTURES/get-console-output.latest.first-boot.txt
 readonly CONSOLE_LATER=$FIXTURES/get-console-output.latest.later-boot.txt
@@ -39,6 +38,7 @@ readonly OTHER_FP=SHA256:kz+Tw/36PkRNhaOvv5otG5S4Peg4eicnqhu/ViZnv2E   # its ECD
 readonly PIN=8ef18ef53d3baa03eebe5f2238a3a4ceef1b6f4a
 readonly HELPER_PATH=/usr/local/libexec/helios-lab/helios-lab-host
 readonly PUSH_CMD="sudo bash -c 'stage=\$(mktemp -d /tmp/helios-lab-push.XXXXXX) && cd \"\$stage\" && bash -s && exec bash ./helios-lab-host install \"\$stage\"'"
+readonly SMOKE_CMD="uname -o 2>&1; echo \"helios-lab-smoke uname \$?\"; pfexec dtrace -n 'BEGIN { exit(0); }' 2>&1; echo \"helios-lab-smoke dtrace \$?\""
 readonly RFD26_LINE='seed · fetching and verifying the 2.4 GB Helios seed (about 5 min the first time) · meanwhile, read RFD 26: https://rfd.shared.oxide.computer/rfd/0026'
 # The provision lines of a clean first run (progress_reply 'done')
 readonly STAGE_LINES="packages · done · 41s · 8 packages installed
@@ -54,9 +54,7 @@ guest · done · 1m05s · created · first boot under way"
 # group, this Mac at the allowed IP, and a host that verifies and provisions
 world_running() {
   lab_key
-  reply_seq ec2-describe-instances 1 "$RUNNING"
-  set_field 1 "$(lab_fp)" < "$KEY_TAG" | reply ec2-describe-instances.2
-  reply ec2-describe-instances "$RUNNING"
+  tagged < "$RUNNING" | reply ec2-describe-instances
   reply ec2-describe-security-group-rules "$RULES_CONVERGED"
   reply ec2-wait < /dev/null
   caller_ip_is "$HOST_IP"
@@ -357,7 +355,7 @@ host key · ED25519 $HOST_FP matches the console · pinned · Ns
 push · host code and config installed · idle 60 min · engvm @8ef18ef
 $STAGE_LINES
 host ready · KVM, libvirt and the metadata guard are in place
-first boot · waiting for the guest's smoke check (up to 0m)
+first boot · waiting for the guest's smoke check (up to 30m)
 guest · verified · its console is free · it starts with the host from now on
 guest ready in Ns · illumos · dtrace ok
   in the guest, try: pfexec dtrace -n 'syscall:::entry { @[execname] = count(); }'  (Ctrl-C prints system calls by process)
@@ -369,8 +367,7 @@ next: helios-lab ssh" "$(steady <<< "$OUT" | sed -E 's/^(guest ready in )[0-9]+s
 ssh -F $cfg host sudo systemctl start helios-lab-provision.service
 ssh -F $cfg host $HELPER_PATH progress
 ssh -F $cfg host sudo $HELPER_PATH status
-ssh -F $cfg guest uname -o
-ssh -F $cfg guest pfexec dtrace -n 'BEGIN { exit(0); }'
+ssh -F $cfg guest $SMOKE_CMD
 ssh -F $cfg host sudo $HELPER_PATH guest-verified" "$(ssh_calls)"
   assert_not_contains "$(calls)" 'StrictHostKeyChecking'   # no call loosens the fragment
   assert_not_contains "$(calls)" 'scp '
@@ -858,21 +855,30 @@ fake_tools() {
   nft() { tool nft "$@"; [[ $1 != list ]] || printf '%s\n' "$NFT_LISTING"; }
   usermod() { tool usermod "$@"; }
   virsh() { tool virsh "$@"; [[ $3 != net-info ]] || printf 'Name: default\nActive: %s\n' "$NET_ACTIVE"; }
-  apt-get() { tool apt-get "$@"; fail_first apt-get; }
-  dpkg() { tool dpkg "$@"; fail_first dpkg; }
+  apt-get() { tool apt-get "$@"; fail_first apt-get "$APT_LOCKED"; }
+  dpkg() { tool dpkg "$@"; fail_first dpkg "$DPKG_LOCKED"; }
   timeout() { tool timeout "$@"; return 2; }   # cloud-init status --wait: "degraded"
   sleep() { tool sleep "$@"; }
   kvm_usable() { [[ $KVM == yes ]]; }
 }
 
-# fail_first <tool> — the tool fails while $FAIL_<tool> calls remain
+# fail_first <tool> <what it says while another apt holds the lock> — the
+# tool fails while its $FAILS calls remain (only FAIL_TOOL fails, when set),
+# saying FAIL_SAYS when set (a failure that is no held lock), else that line
 fail_first() {
   local counter=$SANDBOX/fails.$1 left
+  [[ -z ${FAIL_TOOL:-} || $FAIL_TOOL == "$1" ]] || return 0
   left=$(cat "$counter" 2>/dev/null || echo "${FAILS:-0}")
   (( left > 0 )) || return 0
   echo $(( left - 1 )) > "$counter"
+  printf '%s\n' "${FAIL_SAYS:-$2}" >&2
   return 100
 }
+
+# What apt (2.7, Ubuntu 24.04) and dpkg (1.22) print while another run holds
+# the lock: hand-written in their shapes, as no capture has them
+readonly APT_LOCKED='E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 4242 (unattended-upgr)'
+readonly DPKG_LOCKED='dpkg: error: dpkg frontend lock was locked by another process with pid 4242'
 
 test_the_packages_stage_waits_out_apt_locks_and_never_prompts() {
   host_env
@@ -894,6 +900,7 @@ sleep 10
 $apt update
 $apt -y install qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients libnss-libvirt cpu-checker cpio nftables" "$(tools_log)"
   assert_contains "$(<"$SANDBOX/stage.out")" 'cloud-init did not report done; continuing'
+  assert_contains "$(<"$SANDBOX/stage.out")" "$APT_LOCKED"   # what apt said reaches the journal
 }
 
 test_the_packages_stage_gives_up_after_its_lock_retries_with_a_reason() {
@@ -901,9 +908,47 @@ test_the_packages_stage_gives_up_after_its_lock_retries_with_a_reason() {
   fake_tools
   FAILS=99 stage_call stage_packages
   assert_eq 1 "$RC"
-  assert_eq 'dpkg --configure -a kept failing: the dpkg database needs a hand (see the journal)' "$SUMMARY"
+  assert_eq 'dpkg --configure -a found the lock held in 30 tries, 10s apart: another apt or dpkg run holds it (see the journal)' "$SUMMARY"
   assert_eq "$LOCK_TRIES" "$(tools_log | grep -c '^dpkg ')" 'bounded tries'
+  assert_eq $(( LOCK_TRIES - 1 )) "$(tools_log | grep -c '^sleep 10$')" 'a wait between tries'
   assert_eq 0 "$(tools_log | grep -c '^apt-get ' || true)" 'no apt after dpkg failed'
+}
+
+test_a_packages_failure_that_is_not_a_held_lock_fails_at_once_with_apts_own_line() {
+  host_env
+  fake_tools
+  local says=$'Reading package lists...\nE: Unable to locate package nftables'
+  FAILS=99 FAIL_TOOL=apt-get FAIL_SAYS=$says stage_call stage_packages
+  assert_eq 1 "$RC"
+  assert_eq 'apt-get update failed (exit 100): E: Unable to locate package nftables' "$SUMMARY"
+  assert_eq 1 "$(tools_log | grep -c '^apt-get ')" 'one try'
+  assert_eq 0 "$(tools_log | grep -c '^sleep ' || true)" 'no wait'
+  assert_contains "$(<"$SANDBOX/stage.out")" "$says"   # apt's whole say, in the journal
+  : > "$SANDBOX/tools.log"; rm -f "$SANDBOX"/fails.*
+  FAILS=99 FAIL_TOOL=dpkg FAIL_SAYS='dpkg: error processing package libvirt-daemon (--configure): subprocess installed post-installation script returned error exit status 1' \
+    stage_call stage_packages
+  assert_eq 'dpkg --configure -a failed (exit 100): dpkg: error processing package libvirt-daemon (--configure): subprocess installed post-installation script returned error exit status 1' "$SUMMARY"
+  assert_eq 1 "$(tools_log | grep -c '^dpkg ')" 'one try'
+}
+
+test_only_a_held_lock_is_worth_waiting_out() {
+  host_env
+  local text
+  # Hand-written in the shapes apt 2.7 and dpkg 1.22 (and dpkg before 1.21) print
+  for text in "$APT_LOCKED" "$DPKG_LOCKED" \
+              'E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), is another process using it?' \
+              $'E: Could not get lock /var/lib/apt/lists/lock. It is held by process 4242 (apt-get)\nE: Unable to lock directory /var/lib/apt/lists/' \
+              'dpkg: error: dpkg status database is locked by another process'; do
+    lock_held "$text" || fail "not taken for a held lock: $text"
+  done
+  for text in '' 'E: Unable to locate package nftables' 'E: Failed to fetch http://archive.ubuntu.com/ubuntu/dists/noble/InRelease' \
+              'dpkg: error processing package x (--configure):' 'E: Sub-process /usr/bin/dpkg returned an error code (1)'; do
+    if lock_held "$text"; then fail "taken for a held lock: $text"; fi
+  done
+  assert_eq 'E: Unable to locate package nftables' "$(apt_said $'Reading package lists...\nE: Unable to locate package nftables\nE: second')"
+  assert_eq 'dpkg: error: x' "$(apt_said $'noise\ndpkg: error: x')"
+  assert_eq 'the last line' "$(apt_said $'first\nthe last line\n  ')" 'no error line: the last one'
+  assert_eq '' "$(apt_said '')"
 }
 
 test_the_libvirt_stage_checks_kvm_first_then_configures_libvirt() {
@@ -1099,14 +1144,13 @@ test_the_helpers_progress_is_exactly_what_the_mac_parses() {
   assert_eq "$(drop_epochs <<< "$snapshot")" "$(progress_reply 'done' | drop_epochs)"
 }
 
-# unit_inactive — after host_env: systemctl answers as for a finished run
+# unit_inactive — after host_env: systemctl answers as for a finished run,
+# one `systemctl show` block per unit asked for (from its 6th argument on)
 # shellcheck disable=SC2329  # called through cmd_progress
 unit_inactive() {
   systemctl() {
-    case $* in
-      *ActiveState*) echo inactive ;;
-      *Result*)      echo success ;;
-    esac
+    local sep=''
+    for _ in "${@:6}"; do printf '%sActiveState=inactive\nResult=success\n' "$sep"; sep=$'\n'; done
   }
 }
 

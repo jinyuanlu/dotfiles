@@ -14,20 +14,25 @@
 #
 # Data shape: a discovery "row" is one live instance, its fields separated by
 # US ($'\037'), in this order (see Q_DISCOVER in aws.sh):
-#   id state type az public-ip launch-time group-id reason-code reason-text
+#   id state type az public-ip launch-time group-id reason-code reason-text key-tag
+# key-tag is the instance's KeyFingerprint tag (None without one). A read
+# that names reason-text names key-tag too, so the reason never absorbs it.
 #
 # Bash 3.2 (stock macOS /bin/bash): no associative arrays, no mapfile, no
 # ${v,,}, no declare -n. A function that can "fail" returns non-zero and
 # prints nothing, so callers branch with `if x=$(f ...)`.
 
 # --- Up action ---------------------------------------------------------------
-# up_action <ec2-state> -> create | start | wait-then-start | wait-then-create | none
-# Total over every state discovery can return. `none` means no lifecycle call:
-# up still waits for `running` before connecting, a no-op when already there.
+# up_action <ec2-state> -> create | start | wait-then-start | wait-then-create | wait | none
+# Total over every state discovery can return. Neither `wait` nor `none` makes
+# a lifecycle call: `wait` (pending) waits for running, then looks the
+# instance up again, as after a launch or start; `none` (running) connects
+# at once.
 up_action() {
   case $1 in
     absent)          echo create ;;
-    pending|running) echo none ;;
+    pending)         echo wait ;;
+    running)         echo none ;;
     stopping)        echo wait-then-start ;;
     stopped)         echo start ;;
     shutting-down)   echo wait-then-create ;;
@@ -297,11 +302,14 @@ keep_seconds() {
 # on a reply that is neither "off" nor a deadline
 keep_line() {
   case $1 in
-    off) join_dot 'keep · cleared' "the host auto-stops after $2 min idle" ;;
-    *)   [[ $1 =~ ^[1-9][0-9]{0,11}$ ]] || return 1
-         join_dot "keep · $(inhibited_field "$1"), then it stops after $2 min idle" 'helios-lab keep off clears it' ;;
+    off) join_dot 'keep · cleared' "the host $(autostop_field "$2")" ;;
+    *)   is_epoch "$1" || return 1
+         echo "keep · $(ready_stop_note "$2" "$1")" ;;
   esac
 }
+
+# is_epoch <text> -> 0 for a plausible epoch: digits, no sign, no leading 0
+is_epoch() { [[ $1 =~ ^[1-9][0-9]{0,11}$ ]]; }
 
 # armed_stop <stop> <dead-man epoch|""> <idle-minutes> -> how the host stops
 # itself, for the lifecycle messages. <stop> is what up knows is armed:
@@ -322,10 +330,16 @@ armed_stop() {
   esac
 }
 
+# notice_stop <the stop a billing notice named|""> <the stop now armed> ->
+# the stop it names from now on: idle once it named idle, because this up's
+# push armed the idle timer for every boot (and disarmed the dead-man
+# timer); else the stop now armed. A notice only ever moves on to idle.
+notice_stop() { if [[ $1 == idle ]]; then echo idle; else echo "$2"; fi; }
+
 # status_details <id> <az> <type> <public-ip> -> indented detail lines
 status_details() {
   printf '  %-9s %s\n' instance "$1" zone "$2" type "$3"
-  [[ $4 == None || -z $4 ]] || printf '  %-9s %s\n' ip "$4"
+  if present "$4"; then printf '  %-9s %s\n' ip "$4"; fi
   printf '  %-9s %s\n' prices "approximate, as of $PRICE_DATE"
 }
 
@@ -415,6 +429,10 @@ idle_minutes_ok() {
   [[ $1 =~ ^[1-9][0-9]{0,3}$ ]] || return 1
   (( $1 % 5 == 0 && $1 <= 720 ))
 }
+
+# present <field> -> 0 when a row's field holds a value: not empty, and not
+# the None that text output prints for a null (no group, no public IP)
+present() { [[ -n $1 && $1 != None ]]; }
 
 # is_ipv4 <text> -> 0 for a strict dotted quad: no leading zeros, octets <= 255
 is_ipv4() {
@@ -697,7 +715,7 @@ ready_screen() {
 # ready_stop_note <idle-minutes> <keep deadline|none> -> the idle stop, and
 # the keep that holds it off or clears its hold
 ready_stop_note() {
-  if [[ $2 =~ ^[1-9][0-9]*$ ]]; then
+  if is_epoch "$2"; then
     echo "$(inhibited_field "$2"), then it stops after $1 min idle · helios-lab keep off clears it"
   else
     echo "$(autostop_field "$1") · helios-lab keep 3h to hold it"

@@ -14,16 +14,16 @@ readonly DERIVED="$FIXTURES/derived"
 
 # Discovery row columns (the row contract in lib/state.sh), for set_field.
 # shellcheck disable=SC2034  # used by the *.test.sh files that source this
-readonly COL_STATE=2 COL_LAUNCH=6 COL_REASON=9
+readonly COL_STATE=2 COL_LAUNCH=6 COL_REASON=9 COL_TAG=10
 
 # --- Sandbox and runner ------------------------------------------------------
 # Every test gets its own HOME, so the fixed lab-key path ~/.ssh/... resolves
 # inside the sandbox and no test can read or write the real ~/.ssh. Retries
-# don't sleep.
+# don't sleep: tests/stubs/sleep only records.
 new_sandbox() {
   SANDBOX=$(mktemp -d "$TEST_TMP/t.XXXXXX")
   export STUB_AWS_DIR=$SANDBOX/aws STUB_CURL_DIR=$SANDBOX/curl STUB_SSH_DIR=$SANDBOX/ssh STUB_LOG=$SANDBOX/calls.log
-  export HELIOS_LAB_STATE_DIR=$SANDBOX/state HOME=$SANDBOX/home HELIOS_LAB_RETRY_SECONDS=0
+  export HELIOS_LAB_STATE_DIR=$SANDBOX/state HOME=$SANDBOX/home
   mkdir -p "$STUB_AWS_DIR" "$STUB_CURL_DIR" "$STUB_SSH_DIR" "$HOME"
   : > "$STUB_LOG"
 }
@@ -165,6 +165,10 @@ lab_key() {
 }
 lab_fp() { ssh-keygen -lf "$(lab_key_path).pub" | awk '{ print $2 }'; }
 
+# tagged — discovery rows on stdin, carrying the test lab key's
+# KeyFingerprint tag (the captures have none: their column is None)
+tagged() { set_field "$COL_TAG" "$(lab_fp)"; }
+
 # --- Host scenario builders (U2) ---------------------------------------------
 # ssh_reply <name> [file] — the stub ssh's (or ssh-keyscan's) stdout for
 # <name>, e.g. ssh-host-progress (naming rule: tests/stubs/ssh)
@@ -196,12 +200,21 @@ world_host_ok() {
 }
 
 # guest_smoke_ok — the guest answers both smoke checks as the spike's did.
-# Hand-written (no capture): uname -o's one word, and what dtrace prints on
-# stdout for a BEGIN probe that exits (its "matched 1 probe" goes to stderr).
-guest_smoke_ok() {
-  echo illumos | ssh_reply ssh-guest-uname
-  printf '%s\n' 'CPU     ID                    FUNCTION:NAME' '  0      1                           :BEGIN' \
-    | ssh_reply ssh-guest-dtrace
+# Hand-written (no capture): uname -o's one word, and what dtrace prints for
+# a BEGIN probe that exits (its "matched 1 probe" line is stderr's, which
+# the smoke command joins in).
+readonly DTRACE_BEGIN_OUT="dtrace: description 'BEGIN ' matched 1 probe
+CPU     ID                    FUNCTION:NAME
+  0      1                           :BEGIN"
+guest_smoke_ok() { smoke_reply illumos 0 "$DTRACE_BEGIN_OUT" 0 | ssh_reply ssh-guest-uname; }
+
+# smoke_reply <uname output> <its exit status> [<dtrace output> <its exit
+# status>] -> what the guest prints for the smoke command, lib/remote.sh
+# SMOKE_COMMAND (the stub names its reply ssh-guest-uname, for the command's
+# first word): each check's output, then its marker line
+smoke_reply() {
+  printf '%s\n' "$1" "helios-lab-smoke uname $2"
+  (( $# < 4 )) || printf '%s\n' "$3" "helios-lab-smoke dtrace $4"
 }
 
 # progress_reply <done|unchanged|packages-running|libvirt-running|guard-failed|died|seed-timeout> [run-epoch]

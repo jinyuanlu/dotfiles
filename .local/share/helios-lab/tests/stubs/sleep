@@ -1,0 +1,14 @@
+#!/bin/bash
+# shellcheck source-path=SCRIPTDIR
+#
+# Stub `sleep` for the helios-lab tests. Every retry and poll in helios-lab
+# waits RETRY_SECONDS (10 s) between attempts, a constant, and a suite that
+# waited for real would take hours: this records "sleep <args>" in STUB_LOG
+# and returns at once. A test that needs a real pause runs /bin/sleep. The
+# host helper's tests fake sleep with a shell function instead (fake_tools).
+set -euo pipefail
+
+# shellcheck source=../stub-replay.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-replay.sh"
+
+stub_record sleep "$@"

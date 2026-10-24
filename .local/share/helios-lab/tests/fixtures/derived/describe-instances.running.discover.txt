@@ -1,1 +1,1 @@
-i-0123456789abcdef0	running	m8i.xlarge	ap-northeast-1a	203.0.113.10	2026-10-24T10:50:39+00:00	sg-0123456789abcdef0	None	
+i-0123456789abcdef0	running	m8i.xlarge	ap-northeast-1a	203.0.113.10	2026-10-24T10:50:39+00:00	sg-0123456789abcdef0	None		None

@@ -28,7 +28,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 readonly RUNNING=$DERIVED/describe-instances.running.discover.txt
 readonly STOPPED_IDLE=$DERIVED/describe-instances.stopped-idle.discover.txt
 readonly STOPPED_USER=$DERIVED/describe-instances.stopped-user.discover.txt
-readonly KEY_TAG=$DERIVED/describe-instances.running.key-tag.txt
 readonly RULES_CONVERGED=$DERIVED/describe-security-group-rules.converged.rules.txt
 readonly INGRESS=$DERIVED/describe-security-group-rules.converged.ingress.txt
 readonly STARTING=$DERIVED/start-instances.state.txt
@@ -44,6 +43,7 @@ readonly PIN=$LAB_PIN
 readonly OTHER_PIN=0123456789abcdef0123456789abcdef01234567
 readonly HELPER_PATH=/usr/local/libexec/helios-lab/helios-lab-host
 readonly SMOKE_DTRACE_CMD="pfexec dtrace -n 'BEGIN { exit(0); }'"
+readonly SMOKE_CMD="uname -o 2>&1; echo \"helios-lab-smoke uname \$?\"; $SMOKE_DTRACE_CMD 2>&1; echo \"helios-lab-smoke dtrace \$?\""
 readonly ONE_LINER="pfexec dtrace -n 'syscall:::entry { @[execname] = count(); }'"
 readonly RFD26_TEXT='meanwhile, read RFD 26: https://rfd.shared.oxide.computer/rfd/0026'
 readonly NET_DOWN='ssh: connect to host 203.0.113.10 port 22: Operation timed out'
@@ -54,9 +54,7 @@ readonly NET_DOWN='ssh: connect to host 203.0.113.10 port 22: Operation timed ou
 # cleanly (tests/lib.sh world_host_ok)
 world_running() {
   lab_key
-  reply_seq ec2-describe-instances 1 "$RUNNING"
-  set_field 1 "$(lab_fp)" < "$KEY_TAG" | reply ec2-describe-instances.2
-  reply ec2-describe-instances "$RUNNING"
+  tagged < "$RUNNING" | reply ec2-describe-instances
   reply ec2-describe-security-group-rules "$RULES_CONVERGED"
   reply ec2-wait < /dev/null
   caller_ip_is "$HOST_IP"
@@ -114,8 +112,8 @@ test_up_marks_the_guest_verified_only_after_both_smoke_checks_then_shows_the_rea
   run_cli up
   assert_rc 0
   assert_eq 1 "$(ssh_count "host sudo $HELPER_PATH guest-verified")" 'one guest-verified'
-  assert_log_order "$(cfg) guest uname -o" "$(cfg) guest $SMOKE_DTRACE_CMD"
-  assert_log_order "$(cfg) guest $SMOKE_DTRACE_CMD" "host sudo $HELPER_PATH guest-verified"
+  assert_eq 1 "$(ssh_count "$(cfg) guest $SMOKE_CMD")" 'both checks in one connection'
+  assert_log_order "$(cfg) guest $SMOKE_CMD" "host sudo $HELPER_PATH guest-verified"
   assert_log_order "host sudo $HELPER_PATH status" "$(cfg) guest uname -o"   # the host is asked first
   assert_eq "guest ready in Ns · illumos · dtrace ok
   in the guest, try: $ONE_LINER  (Ctrl-C prints system calls by process)
@@ -133,8 +131,7 @@ test_a_second_up_with_a_verified_guest_reruns_only_the_push_and_the_smoke_check(
   run_cli up
   assert_rc 0
   assert_eq 0 "$(ssh_count guest-verified)" 'a verified guest is not marked again'
-  assert_eq 1 "$(ssh_count "guest uname -o")"
-  assert_eq 1 "$(ssh_count "guest $SMOKE_DTRACE_CMD")"
+  assert_eq 1 "$(ssh_count "guest $SMOKE_CMD")"
   assert_contains "$OUT" "guest boot · waiting for the guest's smoke check"   # the restart budget
   assert_not_contains "$OUT" 'guest key ·'
   assert_eq 'next: helios-lab ssh' "$(tail -1 <<< "$OUT")"
@@ -142,12 +139,12 @@ test_a_second_up_with_a_verified_guest_reruns_only_the_push_and_the_smoke_check(
 
 test_a_guest_whose_uname_is_not_illumos_fails_naming_what_it_printed_and_is_not_marked() {
   world_running
-  echo GNU/Linux | ssh_reply ssh-guest-uname
+  smoke_reply GNU/Linux 0 'bash: pfexec: command not found' 127 | ssh_reply ssh-guest-uname
   run_cli up
   assert_rc 1
   assert_contains "$ERR" "the guest is not Helios: uname -o printed 'GNU/Linux', not illumos"
   assert_contains "$ERR" 'helios-lab ssh host getent hosts helios'
-  assert_eq 0 "$(ssh_count "guest $SMOKE_DTRACE_CMD")" 'no DTrace on a guest that is not Helios'
+  assert_not_contains "$ERR" 'DTrace failed'   # uname's verdict settles it first
   assert_eq 0 "$(ssh_count guest-verified)" 'no marker'
   assert_contains "$ERR" "host $LAB_ID is running and billing"
   assert_not_contains "$OUT" 'guest ready'
@@ -170,7 +167,8 @@ test_uname_verdict_needs_exactly_illumos_from_uname_o() {
 
 test_a_dtrace_probe_that_fails_names_dtrace_and_pfexec_and_writes_no_marker() {
   world_running
-  ssh_reply_error ssh-guest-dtrace 1 'dtrace: failed to initialize dtrace: DTrace requires additional privileges'
+  smoke_reply illumos 0 'dtrace: failed to initialize dtrace: DTrace requires additional privileges' 1 \
+    | ssh_reply ssh-guest-uname
   run_cli up
   assert_rc 1
   assert_contains "$ERR" "DTrace failed on the guest: $SMOKE_DTRACE_CMD exited 1"
@@ -192,6 +190,24 @@ test_the_smoke_probe_is_the_plans_dtrace_one_liner_that_ends_itself() {
   assert_eq 'uname -o' "$SMOKE_UNAME"
   assert_eq "$SMOKE_DTRACE_CMD" "$SMOKE_DTRACE"
   assert_contains "$SMOKE_DTRACE" 'exit(0)'
+  assert_eq "$SMOKE_CMD" "$SMOKE_COMMAND" 'both, in one remote command'
+}
+
+test_the_smoke_reply_is_read_back_check_by_check() {
+  load_cli
+  local reply
+  reply=$(smoke_reply illumos 0 "$DTRACE_BEGIN_OUT" 0)
+  assert_eq "0${US}illumos" "$(smoke_result 0 "$reply" uname)"
+  assert_eq "0${US}$DTRACE_BEGIN_OUT" "$(smoke_result 0 "$reply" dtrace)"
+  reply=$(smoke_reply illumos 0 'dtrace: failed to initialize dtrace' 1)
+  assert_eq "1${US}dtrace: failed to initialize dtrace" "$(smoke_result 0 "$reply" dtrace)"
+  reply=$(smoke_reply '' 127)
+  assert_eq "127${US}" "$(smoke_result 0 "$reply" uname)" 'nothing printed'
+  assert_eq "?${US}$reply" "$(smoke_result 0 "$reply" dtrace)" 'the shell stopped before dtrace: failed'
+  assert_eq failed "$(dtrace_verdict '?' '')"
+  # ssh's own failure, or the remote shell's, stands for both checks
+  assert_eq "255${US}Connection closed by UNKNOWN port 65535" "$(smoke_result 255 'Connection closed by UNKNOWN port 65535' dtrace)"
+  if smoke_part "$(smoke_reply illumos 0)" dtrace >/dev/null; then fail 'found a dtrace part without its marker'; fi
 }
 
 # --- Mac: the guest key ------------------------------------------------------
@@ -282,7 +298,7 @@ test_a_guest_that_refuses_the_key_while_booting_is_retried_until_it_lets_us_in()
 # --- Mac: a host that stops itself mid-up ------------------------------------
 test_a_host_that_stopped_itself_mid_up_is_named_and_up_follows_the_state_machine() {
   world_running
-  set_field "$COL_STATE" stopping < "$STOPPED_IDLE" | reply ec2-describe-instances.4   # asked again after the ssh failure
+  set_field "$COL_STATE" stopping < "$STOPPED_IDLE" | tagged | reply ec2-describe-instances.2   # asked again after the ssh failure
   reply ec2-start-instances "$STARTING"
   ssh_reply_error ssh-host-bash.1 255 "$NET_DOWN"
   run_cli up
@@ -299,7 +315,7 @@ test_a_host_that_stopped_itself_mid_up_is_named_and_up_follows_the_state_machine
 
 test_a_host_found_stopped_during_the_guest_poll_is_started_again() {
   world_running
-  reply_seq ec2-describe-instances 4 "$STOPPED_IDLE"
+  tagged < "$STOPPED_IDLE" | reply_seq ec2-describe-instances 2
   reply ec2-start-instances "$STARTING"
   local n
   for n in 1 2 3; do ssh_reply_error "ssh-host-status.$n" 255 'Connection closed by 203.0.113.10 port 22'; done
@@ -319,12 +335,12 @@ test_a_host_still_running_after_an_ssh_failure_keeps_the_failure() {
   assert_contains "$ERR" 'cannot reach the host over ssh'
   assert_contains "$ERR" "host $LAB_ID is running and billing"
   assert_eq 0 "$(grep -c 'start-instances' "$STUB_LOG" || true)"
-  assert_eq 4 "$(grep -c '^aws ec2 describe-instances' "$STUB_LOG")" 'discover, key tag, re-lookup, then EC2 asked again'
+  assert_eq 2 "$(grep -c '^aws ec2 describe-instances' "$STUB_LOG")" 'discover (a running host is not looked up again), then EC2 asked again'
 }
 
 test_a_second_stop_while_following_is_not_followed_again() {
   world_running
-  reply_seq ec2-describe-instances 4 "$STOPPED_IDLE"
+  tagged < "$STOPPED_IDLE" | reply_seq ec2-describe-instances 2
   reply ec2-start-instances "$STARTING"
   ssh_reply_error ssh-host-bash 255 "$NET_DOWN"
   run_cli up
@@ -908,11 +924,23 @@ fake_host_tools() {
   systemctl() {
     tool systemctl "$@"
     [[ $1 == show ]] || return 0
-    case $5:$3 in
+    [[ $4 != -p ]] || { fake_show_blocks "${@:6}"; return 0; }
+    case $5:$3 in   # show -p <property> --value <unit>
       "$CREATE_UNIT":*) next_of create "${FAKE_CREATE:-inactive}" ;;
       *:ActiveState)    echo inactive ;;
       *)                echo success ;;
     esac
+  }
+  # show -p ActiveState -p Result <unit>...: one block per unit, Result first
+  # (as systemctl prints a service's own properties before its unit's)
+  fake_show_blocks() {
+    local unit sep='' state
+    for unit in "$@"; do
+      state=inactive
+      [[ $unit != "$CREATE_UNIT" ]] || state=$(next_of create "${FAKE_CREATE:-inactive}")
+      printf '%sResult=success\nActiveState=%s\n' "$sep" "$state"
+      sep=$'\n'
+    done
   }
   virsh() {
     tool virsh "$@"
@@ -1134,15 +1162,25 @@ test_the_helpers_status_only_reads() {
   log=$( host_env; fake_host_tools; host_files
          FAKE_DOMSTATES=running FAKE_CREATE=active FAKE_LEASE=$GUEST_IP cmd_status > /dev/null
          tools_log )
-  assert_eq "systemctl show -p ActiveState --value helios-lab-provision.service
-systemctl show -p Result --value helios-lab-provision.service
-systemctl show -p ActiveState --value helios-lab-idle.timer
-systemctl show -p Result --value helios-lab-idle.service
-systemctl show -p ActiveState --value helios-lab-deadman.timer
+  assert_eq "systemctl show -p ActiveState -p Result helios-lab-provision.service helios-lab-idle.timer helios-lab-idle.service helios-lab-deadman.timer helios-lab-create.service
 virsh -c qemu:///system domstate helios
-systemctl show -p ActiveState --value helios-lab-create.service
 getent hosts helios
-port22 $GUEST_IP" "$log"
+port22 $GUEST_IP" "$log" 'one systemctl show for every unit fact'
+}
+
+test_one_systemctl_show_is_read_back_unit_by_unit() {
+  host_env
+  # Hand-written in the shape `systemctl show -p ActiveState -p Result a b`
+  # prints: a block per unit, in the order asked, one blank line apart.
+  local show=$'Result=success\nActiveState=active\n\nResult=exit-code\nActiveState=failed\n'
+  assert_eq active "$(show_value "$show" 1 ActiveState)"
+  assert_eq exit-code "$(show_value "$show" 2 Result)"
+  assert_eq unknown "$(show_value "$show" 3 ActiveState)" 'no such block'
+  assert_eq unknown "$(show_value '' 1 Result)" 'systemctl said nothing'
+  assert_eq unknown "$(show_value $'ActiveState=\nResult=success' 1 ActiveState)" 'an empty value'
+  assert_eq 1 "$(unit_place helios-lab-provision.service)"
+  assert_eq 5 "$(unit_place helios-lab-create.service)"
+  assert_eq 0 "$(unit_place sshd.service)"
 }
 
 test_the_status_reply_of_a_host_without_lease_or_domain() {

@@ -17,7 +17,7 @@
 #   one lab instance". --profile is always the configured one.
 # The one exception is `aws --version`, which reads no profile or region.
 #
-# Requires from the entry: PROFILE, HELIOS_LAB_HOME, die, EX_*.
+# Requires from the entry: PROFILE, HELIOS_LAB_HOME, die, attempt, EX_*.
 
 readonly REGION=ap-northeast-1
 readonly TAG_PROJECT=helios-lab
@@ -46,11 +46,10 @@ readonly F_MANAGED="Name=tag:ManagedBy,Values=$TAG_MANAGED_BY"
 # Queries. The test stub replays their text output, derived from the captured
 # fixtures by tests/derive-text (fixtures/derived/). Change one, re-derive.
 # Field order is the row contract documented in state.sh.
-readonly Q_DISCOVER='Reservations[].Instances[].[InstanceId,State.Name,InstanceType,Placement.AvailabilityZone,PublicIpAddress,LaunchTime,SecurityGroups[0].GroupId,StateReason.Code,StateTransitionReason]'
+readonly Q_DISCOVER="Reservations[].Instances[].[InstanceId,State.Name,InstanceType,Placement.AvailabilityZone,PublicIpAddress,LaunchTime,SecurityGroups[0].GroupId,StateReason.Code,StateTransitionReason,Tags[?Key=='KeyFingerprint'].Value | [0]]"
 readonly Q_GROUP_IDS='SecurityGroups[].[GroupId]'
 readonly Q_INGRESS='SecurityGroupRules[?!IsEgress].[IpProtocol,FromPort,ToPort,CidrIpv4]'
 # U6. Each has a derived reply in fixtures/derived/ (README table).
-readonly Q_KEY_TAG="Reservations[].Instances[].[Tags[?Key=='KeyFingerprint'].Value | [0]]"
 readonly Q_ROOT_VOLUMES='Reservations[].Instances[].BlockDeviceMappings[].Ebs.[VolumeId,DeleteOnTermination]'
 readonly Q_VOLUME_IDS='Volumes[].[VolumeId]'
 readonly Q_CALLER='[Account,Arn]'
@@ -85,30 +84,32 @@ require_aws_cli() {
     || die "$EX_FAIL" 'aws CLI not found: brew install awscli (it is in ~/.Brewfile)'
 }
 
-# aws_attempt <service> <operation> [args...] -> an Either, told apart by the
-# exit status: 0 with the CLI's stdout, or the CLI's own status with its
-# stderr (on stdout, so the caller can classify it). For calls whose failure
-# can be an answer: the dry-run, capacity, DependencyViolation. Callers run
-# require_aws_cli first, outside the capture, so a missing CLI dies once.
-aws_attempt() {
-  local errf out rc=0
-  errf=$(mktemp "${TMPDIR:-/tmp}/helios-lab.XXXXXX") || return 1
-  out=$(aws "$@" --output text --profile "$PROFILE" --region "$REGION" 2>"$errf") || rc=$?
-  (( rc == 0 )) || out=$(<"$errf")
-  rm -f "$errf"
-  printf '%s' "$out"
+# aws_attempt <service> <operation> [args...] -> the entry's attempt, for one
+# call in the contract's shape
+aws_attempt() { attempt aws "$@" --output text --profile "$PROFILE" --region "$REGION"; }
+
+# aws_expect <codes> <service> <operation> [args...] -> the call's answer:
+# 0 with the CLI's stdout; or, when it fails with one of <codes> (EC2 error
+# codes, space-separated: an answer the caller handles, such as capacity or
+# DependencyViolation), the CLI's exit status with "<code><US><the CLI's
+# first line>". Any other failure dies with a typed code and a fix-it hint
+# (aws_fail). The one place the CLI is checked for, outside the capture, so
+# a missing one dies once, with the install hint.
+aws_expect() {
+  local codes=$1 out rc=0 code
+  shift
+  require_aws_cli
+  out=$(aws_attempt "$@") || rc=$?
+  (( rc != 0 )) || { printf '%s' "$out"; return 0; }
+  code=$(aws_error_code "$out") || code=''
+  [[ -n $code && " $codes " == *" $code "* ]] || aws_fail "$(call_label "$@")" "$out"
+  printf '%s%s%s' "$code" "$US" "$(first_line "$out")"
   return "$rc"
 }
 
-# aws_call <service> <operation> [args...] -> the CLI's stdout. On failure it
-# dies with a typed code and a fix-it hint (see aws_fail).
-aws_call() {
-  require_aws_cli
-  local out rc=0
-  out=$(aws_attempt "$@") || rc=$?
-  (( rc == 0 )) || aws_fail "$1 $2" "$out"
-  printf '%s' "$out"
-}
+# aws_call <service> <operation> [args...] -> the CLI's stdout: aws_expect,
+# with no failure an answer
+aws_call() { aws_expect '' "$@"; }
 
 # aws_query <service> <operation> <query> [args...] -> the query's text output,
 # one row per line, fields US-delimited
@@ -153,6 +154,14 @@ dry_run_outcome() {
     *:UnauthorizedOperation) echo denied ;;
     *)                       echo fail ;;
   esac
+}
+
+# call_label <service> <operation> [args...] -> how a failure names the call:
+# "ec2 run-instances", or "ec2 run-instances --dry-run" for the dry-run  (pure)
+call_label() {
+  local arg label="$1 $2"
+  for arg in "$@"; do [[ $arg != --dry-run ]] || label="$label --dry-run"; done
+  echo "$label"
 }
 
 # first_line <text> -> its first non-blank line (AWS errors start with a blank one)
@@ -211,9 +220,6 @@ caller_ip() {
   printf '%s\n' "$ip"
 }
 
-# aws_instance_key_tag <instance-id> -> its KeyFingerprint tag, or None
-aws_instance_key_tag() { aws_query ec2 describe-instances "$Q_KEY_TAG" --instance-ids "$1"; }
-
 # aws_root_volumes <instance-id>... -> one "volume-id delete-on-termination" row per volume
 aws_root_volumes() { aws_query ec2 describe-instances "$Q_ROOT_VOLUMES" --instance-ids "$@"; }
 
@@ -228,11 +234,9 @@ aws_console_output() { aws_call ec2 get-console-output --instance-id "$1" --late
 
 # --- Preflight (create path only) --------------------------------------------
 # aws_cli_version -> what `aws --version` prints (outside the call contract:
-# it reads no profile or region)
-aws_cli_version() {
-  require_aws_cli
-  aws --version 2>&1 || true
-}
+# it reads no profile or region). The create path asks only after discovery,
+# whose call checked that the CLI is there.
+aws_cli_version() { aws --version 2>&1 || true; }
 
 # aws_caller -> "account<US>arn" of the profile's identity
 aws_caller() { aws_query sts get-caller-identity "$Q_CALLER"; }
@@ -301,36 +305,37 @@ preflight_placement() {
 # aws_dry_run_launch <type> <subnet-id> — dies unless EC2 says the launch
 # would succeed. No security group (the group may not exist yet; the VPC's
 # default group stands in) and placeholder key material; everything else is
-# the real launch's, from the one definition in aws_launch_attempt.
+# the real launch's, from the one definition in aws_run_instances. A
+# success (exit 0) is impossible for a real dry-run, so it fails too.
 aws_dry_run_launch() {
-  require_aws_cli
-  local out rc=0 user_data
+  local out rc=0 user_data said
   user_data=$(render_user_data "$PLACEHOLDER_PUBKEY") || return 1
-  out=$(aws_launch_attempt "$1" "$2" "$PLACEHOLDER_FP" "$user_data" --dry-run) || rc=$?
-  case $(dry_run_outcome "$rc" "$out") in
+  out=$(aws_run_instances 'DryRunOperation UnauthorizedOperation' "$1" "$2" "$PLACEHOLDER_FP" "$user_data" \
+    --dry-run) || rc=$?
+  said=${out#*"$US"}
+  case $(dry_run_outcome "$rc" "$said") in
     pass)   return 0 ;;
     denied) die "$EX_AUTH" "profile '$PROFILE' may not launch the lab instance: the RunInstances dry-run was refused" \
-              "attach the shipped least-privilege policy: $HELIOS_LAB_HOME/iam-policy.json" \
-              "aws said: $(first_line "$out")" ;;
-    *)      aws_fail 'ec2 run-instances --dry-run' "$out" ;;
+              "attach the shipped least-privilege policy: $HELIOS_LAB_HOME/iam-policy.json" "aws said: $said" ;;
+    *)      aws_fail 'ec2 run-instances --dry-run' "$said" ;;
   esac
 }
 
 # --- Launch, start, stop, terminate ------------------------------------------
-# aws_launch_attempt <type> <subnet-id> <key-fingerprint> <user-data> [args...]
-# -> Either (aws_attempt). The single definition of the lab instance, shared
-# by the preflight dry-run and the launch, so the dry-run authorizes exactly
-# what the launch asks for:
+# aws_run_instances <expected codes> <type> <subnet-id> <key-fingerprint>
+# <user-data> [args...] -> aws_expect's answer. The single definition of the
+# lab instance, shared by the preflight dry-run and the launch, so the
+# dry-run authorizes exactly what the launch asks for:
 # - nested virtualization; IMDSv2 required with hop limit 1; no instance
 #   profile, ever (none is passed, and the policy withholds iam:PassRole)
 # - shutdown behaviour stop, so the idle path can stop but never terminate
 # - an encrypted 100 GB gp3 root, DeleteOnTermination set explicitly
 # - every resource tagged in the call that creates it: the instance and its
 #   volume carry both lab tags, Name and the lab key's fingerprint
-aws_launch_attempt() {
-  local type=$1 subnet=$2 fp=$3 user_data=$4
-  shift 4
-  aws_attempt ec2 run-instances --image-id "$AMI_SSM" --instance-type "$type" --subnet-id "$subnet" \
+aws_run_instances() {
+  local codes=$1 type=$2 subnet=$3 fp=$4 user_data=$5
+  shift 5
+  aws_expect "$codes" ec2 run-instances --image-id "$AMI_SSM" --instance-type "$type" --subnet-id "$subnet" \
     --cpu-options NestedVirtualization=enabled \
     --metadata-options HttpTokens=required,HttpPutResponseHopLimit=1,HttpEndpoint=enabled \
     --instance-initiated-shutdown-behavior stop \
@@ -348,33 +353,25 @@ lab_tag_spec() {
 # -> "instance-id<US>launch-time". One attempt only: a capacity error exits 5
 # naming the type and the override; there is no retry loop.
 aws_launch() {
-  require_aws_cli
   local out rc=0
-  out=$(aws_launch_attempt "$1" "$2" "$5" "$6" --security-group-ids "$4" --query "$Q_LAUNCHED") || rc=$?
-  (( rc == 0 )) || launch_fail "$1" "$3" "$out"
-  printf '%s' "${out//$'\t'/$US}"
-}
-
-# launch_fail <type> <az> <stderr> — dies; capacity names the override
-launch_fail() {
-  [[ $(aws_error_code "$3" || true) == InsufficientInstanceCapacity ]] || aws_fail 'ec2 run-instances' "$3"
-  die "$EX_CAPACITY" "EC2 has no $1 capacity in $2 right now; nothing was launched" \
+  out=$(aws_run_instances InsufficientInstanceCapacity "$1" "$2" "$5" "$6" --security-group-ids "$4" \
+    --query "$Q_LAUNCHED") || rc=$?
+  (( rc == 0 )) || die "$EX_CAPACITY" "EC2 has no $1 capacity in $3 right now; nothing was launched" \
     "retry later, or create with another type: HELIOS_LAB_INSTANCE_TYPE=<type> helios-lab up" \
     "types: a non-metal size of $(nested_virt_families), with at least 4 vCPU and 16 GiB" \
-    "aws said: $(first_line "$3")"
+    "aws said: ${out#*"$US"}"
+  printf '%s' "${out//$'\t'/$US}"
 }
 
 # aws_start <instance-id> <type> <az> — a capacity error only says to retry:
 # changing a stopped instance's type needs a permission the policy withholds,
 # so the type override is no remedy here.
 aws_start() {
-  require_aws_cli
   local out rc=0
-  out=$(aws_attempt ec2 start-instances --instance-ids "$1" --query "$Q_STARTING") || rc=$?
-  if (( rc == 0 )); then return 0; fi
-  [[ $(aws_error_code "$out" || true) == InsufficientInstanceCapacity ]] || aws_fail 'ec2 start-instances' "$out"
-  die "$EX_CAPACITY" "EC2 has no $2 capacity in $3 right now; $1 is stopped and intact" \
-    'retry in a few minutes: helios-lab up' "aws said: $(first_line "$out")"
+  out=$(aws_expect InsufficientInstanceCapacity ec2 start-instances --instance-ids "$1" --query "$Q_STARTING") \
+    || rc=$?
+  (( rc == 0 )) || die "$EX_CAPACITY" "EC2 has no $2 capacity in $3 right now; $1 is stopped and intact" \
+    'retry in a few minutes: helios-lab up' "aws said: ${out#*"$US"}"
 }
 
 aws_stop() { aws_call ec2 stop-instances --instance-ids "$1" --query "$Q_STOPPING" >/dev/null; }
@@ -382,11 +379,7 @@ aws_terminate() { aws_call ec2 terminate-instances --instance-ids "$@" --query "
 
 # aws_wait <waiter> <id-option> <id>... — the CLI's own waiter (it polls for
 # up to 10 minutes and fails on a terminal state)
-aws_wait() {
-  local waiter=$1 option=$2
-  shift 2
-  aws_call ec2 wait "$waiter" "$option" "$@" >/dev/null
-}
+aws_wait() { aws_call ec2 wait "$@" >/dev/null; }
 
 # --- Security group ----------------------------------------------------------
 # aws_create_group <vpc-id> -> the new group's ID. Tagged in the same call
@@ -406,14 +399,10 @@ aws_group_rules() { aws_query ec2 describe-security-group-rules "$Q_RULES" --fil
 # between leaves the group narrower, never wider. Rules are not tagged
 # themselves; that would need CreateTags beyond the create actions.
 aws_sg_apply() {
-  local group=$1 dir=$2 verb arg rest
+  local group=$1 dir=$2 arg
   local -a ids=() perms=()
-  while read -r verb arg rest; do
-    case $verb in
-      revoke)    ids+=("$arg") ;;
-      authorize) perms+=("$(sg_perm "$dir" "$arg")") ;;
-    esac
-  done <<< "$3"
+  read -r -a ids <<< "$(plan_args revoke "$3")"
+  for arg in $(plan_args authorize "$3"); do perms+=("$(sg_perm "$dir" "$arg")"); done
   (( ${#ids[@]} == 0 )) || aws_call ec2 "revoke-security-group-$dir" --group-id "$group" \
     --security-group-rule-ids "${ids[@]}" --query "$Q_RETURN" >/dev/null
   (( ${#perms[@]} == 0 )) || aws_call ec2 "authorize-security-group-$dir" --group-id "$group" \
@@ -432,18 +421,17 @@ sg_perm() {
 # reports a dependent object: an ENI of a just-terminated instance lingers
 # for a while. A group that is already gone counts as deleted.
 aws_delete_group() {
-  require_aws_cli
   local n out rc
   for (( n = 1; n <= $2; n++ )); do
     rc=0
-    out=$(aws_attempt ec2 delete-security-group --group-id "$1" --query "$Q_RETURN") || rc=$?
-    if (( rc == 0 )); then return 0; fi
-    case $(aws_error_code "$out" || true) in
+    out=$(aws_expect 'InvalidGroup.NotFound DependencyViolation' ec2 delete-security-group --group-id "$1" \
+      --query "$Q_RETURN") || rc=$?
+    (( rc != 0 )) || return 0
+    case ${out%%"$US"*} in
       InvalidGroup.NotFound) return 0 ;;
       DependencyViolation)   (( n == $2 )) || { echo "security group $1 still in use; retrying in $3s"; sleep "$3"; } ;;
-      *)                     aws_fail 'ec2 delete-security-group' "$out" ;;
     esac
   done
   die "$EX_FAIL" "security group $1 is still in use after $2 attempts (DependencyViolation)" \
-    'run helios-lab destroy --yes again in a few minutes' "aws said: $(first_line "$out")"
+    'run helios-lab destroy --yes again in a few minutes' "aws said: ${out#*"$US"}"
 }

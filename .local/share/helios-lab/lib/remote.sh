@@ -24,10 +24,10 @@
 #
 # Requires from the entry: PROFILE, SSH_CONFIG, KNOWN_HOSTS, LAB_KEY,
 # RETRY_SECONDS, IDLE_MINUTES, ENGVM_PIN, HELIOS_LAB_HOME, state_dir_ensure,
-# die, warn, EX_*; aws.sh: aws_console_output, first_line, REGION, US;
+# die, warn, attempt, EX_*; aws.sh: aws_console_output, first_line, REGION, US;
 # state.sh: fmt_elapsed, fmt_duration, join_dot, count_rows, fingerprint_of,
-# anomaly, local_hhmm, the auto-stop phrases and IDLE_CHECK_S; render.sh: the
-# renderers and ED25519_PUB_RE.
+# anomaly, local_hhmm, present, is_epoch, the auto-stop phrases and
+# IDLE_CHECK_S; render.sh: the renderers and ED25519_PUB_RE.
 
 readonly HOST_HELPER=/usr/local/libexec/helios-lab/helios-lab-host
 readonly PROVISION_UNIT=helios-lab-provision.service
@@ -46,8 +46,12 @@ readonly GUEST_RESTART_ATTEMPTS=30       # 5 min
 # "Boots" means this, through the guest alias (R8): uname -o names the OS
 # (uname -a prints SunOS and never "illumos"), and a DTrace probe that ends
 # itself runs to completion under pfexec (a bare BEGIN would run forever).
+# Both run in one connection: each check's output (its stderr joined in),
+# then a marker line with its exit status (smoke_part reads them back).
 readonly SMOKE_UNAME='uname -o'
 readonly SMOKE_DTRACE="pfexec dtrace -n 'BEGIN { exit(0); }'"
+readonly SMOKE_MARK=helios-lab-smoke
+readonly SMOKE_COMMAND="$SMOKE_UNAME 2>&1; echo \"$SMOKE_MARK uname \$?\"; $SMOKE_DTRACE 2>&1; echo \"$SMOKE_MARK dtrace \$?\""
 # On the host, as helios-lab-host names them (tests check they agree).
 readonly GUEST_MARKER=/var/lib/helios-lab/guest-verified
 readonly GUEST_NAME=helios   # engvm's VM name, which libnss-libvirt resolves
@@ -303,6 +307,9 @@ status_value() {
   return 1
 }
 
+# status_or <reply> <key> <default> -> the value of its first <key> line, or <default>
+status_or() { status_value "$1" "$2" || echo "$3"; }
+
 # console_lines <reply> -> the transcript lines it carries, oldest first
 console_lines() {
   local line
@@ -311,29 +318,35 @@ console_lines() {
   done <<< "$1"
 }
 
-# guest_verified_of <reply> -> yes | no. Anything but an explicit "verified
-# no" with a value is yes: the marker exists, even if its record is unreadable.
+# console_last <reply> -> the latest transcript line, at most 100 characters
+console_last() {
+  local last
+  last=$(console_lines "$1" | tail -1)
+  printf '%s\n' "${last:0:100}"
+}
+
+# guest_verified_of <reply> -> yes | no: the one reading of the verified
+# fact. Anything but an explicit "verified no" with a value is yes: the
+# marker exists, even if its record is unreadable.
 guest_verified_of() {
-  local v
-  v=$(status_value "$1" verified) || v=no
-  if [[ $v == no ]]; then echo no; else echo yes; fi
+  if [[ $(status_or "$1" verified no) == no ]]; then echo no; else echo yes; fi
 }
 
 # guest_ssh_ready <reply> -> 0 when the host sees the guest answer on tcp/22:
 # its domain runs, it holds a DHCP lease, and its sshd accepts connections
 guest_ssh_ready() {
-  [[ $(status_value "$1" domain || true) == running && $(status_value "$1" sshd || true) == open ]] \
-    && [[ $(status_value "$1" lease || echo none) != none ]]
+  [[ $(status_or "$1" domain '') == running && $(status_or "$1" sshd '') == open ]] \
+    && [[ $(status_or "$1" lease none) != none ]]
 }
 
 # guest_wait_phrase <reply> -> how far the guest is, as the host sees it
 guest_wait_phrase() {
   local domain lease
-  domain=$(status_value "$1" domain) || domain=unknown
-  lease=$(status_value "$1" lease) || lease=none
+  domain=$(status_or "$1" domain unknown)
+  lease=$(status_or "$1" lease none)
   if [[ $domain != running ]]; then echo "domain $domain"
   elif [[ $lease == none ]]; then echo 'domain running, no DHCP lease yet'
-  elif [[ $(status_value "$1" sshd || true) != open ]]; then echo "lease $lease, sshd not listening yet"
+  elif [[ $(status_or "$1" sshd '') != open ]]; then echo "lease $lease, sshd not listening yet"
   else echo "lease $lease, sshd listening"
   fi
 }
@@ -343,8 +356,8 @@ guest_wait_phrase() {
 # no transcript: nothing records it once the guest is verified)
 guest_wait_line() {
   local last
-  last=$(console_lines "$1" | tail -1)
-  if [[ -n $last ]]; then printf '%s\n' "${last:0:100}"; else guest_wait_phrase "$1"; fi
+  last=$(console_last "$1")
+  if [[ -n $last ]]; then printf '%s\n' "$last"; else guest_wait_phrase "$1"; fi
 }
 
 # guest_mismatch <reply> -> the anomaly when the verified guest was built from
@@ -353,9 +366,10 @@ guest_wait_line() {
 # never recreated, so this is reported, never applied.
 guest_mismatch() {
   local built pushed bpin bsize ppin psize
-  built=$(status_value "$1" verified) || return 0
-  pushed=$(status_value "$1" pushed) || return 0
-  [[ $built != no && $pushed != unknown ]] || return 0
+  [[ $(guest_verified_of "$1") == yes ]] || return 0
+  built=$(status_value "$1" verified)
+  pushed=$(status_or "$1" pushed unknown)
+  [[ $pushed != unknown ]] || return 0
   read -r bpin bsize <<< "$built"
   read -r ppin psize <<< "$pushed"
   [[ $bpin != "$ppin" || $bsize != "$psize" ]] || return 0
@@ -364,36 +378,45 @@ guest_mismatch() {
     "helios-lab ssh host sudo rm $GUEST_MARKER, then helios-lab up"
 }
 
+# guest_phase <reply> -> where the guest stands: ready (verified, its domain
+# running), a verified guest's other domain state ("shut off", "absent",
+# ...), first-boot (unverified, its create unit running), not-built (no
+# domain) or not-verified (an unverified guest that no create runs for)
+guest_phase() {
+  local domain
+  domain=$(status_or "$1" domain unknown)
+  case $(guest_verified_of "$1"):$(status_or "$1" create unknown):$domain in
+    yes:*:running)               echo ready ;;
+    yes:*)                       echo "$domain" ;;
+    no:active:*|no:activating:*) echo first-boot ;;
+    no:*:absent)                 echo not-built ;;
+    *)                           echo not-verified ;;
+  esac
+}
+
 # guest_field <reply> -> status's headline field for a running host
 guest_field() {
-  local domain create
-  domain=$(status_value "$1" domain) || domain=unknown
-  create=$(status_value "$1" create) || create=unknown
-  if [[ $(guest_verified_of "$1") == yes ]]; then
-    if [[ $domain == running ]]; then echo 'guest ready'; else echo "guest $domain"; fi
-    return 0
-  fi
-  case $create:$domain in
-    active:*|activating:*) echo 'guest first boot' ;;
-    *:absent)              echo 'guest not built' ;;
-    *)                     echo 'guest not verified' ;;
+  local phase
+  phase=$(guest_phase "$1")
+  case $phase in
+    ready)        echo 'guest ready' ;;
+    first-boot)   echo 'guest first boot' ;;
+    not-built)    echo 'guest not built' ;;
+    not-verified) echo 'guest not verified' ;;
+    *)            echo "guest $phase" ;;
   esac
 }
 
 # guest_detail <reply> -> status's guest detail
 guest_detail() {
-  local domain verified pin sizing
-  domain=$(status_value "$1" domain) || domain=unknown
-  verified=$(status_value "$1" verified) || verified=no
-  if [[ $verified != no ]]; then
-    read -r pin sizing <<< "$verified"
-    echo "$GUEST_NAME $domain · verified · engvm @${pin:0:7} · $sizing"
-    return 0
-  fi
-  case $(guest_field "$1") in
-    'guest first boot') echo "$GUEST_NAME $domain · first boot under way" ;;
-    'guest not built')  echo 'not built yet: helios-lab up builds it' ;;
-    *)                  echo "$GUEST_NAME $domain · not verified: the next helios-lab up recreates it" ;;
+  local domain pin sizing
+  domain=$(status_or "$1" domain unknown)
+  case $(guest_phase "$1") in
+    first-boot)   echo "$GUEST_NAME $domain · first boot under way" ;;
+    not-built)    echo 'not built yet: helios-lab up builds it' ;;
+    not-verified) echo "$GUEST_NAME $domain · not verified: the next helios-lab up recreates it" ;;
+    *)            read -r pin sizing <<< "$(status_value "$1" verified)"
+                  echo "$GUEST_NAME $domain · verified · engvm @${pin:0:7} · $sizing" ;;
   esac
 }
 
@@ -442,7 +465,7 @@ stops_armed() {
   local idle timer rest deadman
   idle=$(status_value "$1" idle) || return 1
   read -r timer rest <<< "$idle"
-  deadman=$(status_value "$1" deadman) || deadman=unknown
+  deadman=$(status_or "$1" deadman unknown)
   case $timer:$deadman in
     active:active) echo both ;;
     active:*)      echo idle ;;
@@ -457,7 +480,7 @@ idle_run_of() {
   local v epoch decision count required problem
   v=$(status_value "$1" idle-run) || return 1
   read -r epoch decision count required problem <<< "$v"
-  [[ $epoch =~ ^[1-9][0-9]{0,11}$ && $count =~ ^(0|[1-9][0-9]{0,5})$ && $required =~ ^[1-9][0-9]{0,3}$ ]] || return 1
+  is_epoch "$epoch" && [[ $count =~ ^(0|[1-9][0-9]{0,5})$ && $required =~ ^[1-9][0-9]{0,3}$ ]] || return 1
   case $decision in reset|increment|poweroff) ;; *) return 1 ;; esac
   printf '%s\n' "$epoch$US$decision$US$count$US$required$US$problem"
 }
@@ -474,8 +497,8 @@ idle_problem_of() {
 # inhibit_of <reply> -> the keep's deadline while one is in force, else none
 inhibit_of() {
   local v
-  v=$(status_value "$1" inhibit) || v=none
-  if [[ $v =~ ^[1-9][0-9]{0,11}$ ]]; then echo "$v"; else echo none; fi
+  v=$(status_or "$1" inhibit none)
+  if is_epoch "$v"; then echo "$v"; else echo none; fi
 }
 
 # idle_field <reply> <now> <fallback idle-minutes> -> the headline's
@@ -505,7 +528,7 @@ idle_anomalies() {
   armed=$(stops_armed "$1") || return 0
   idle=$(status_value "$1" idle)
   read -r timer result <<< "$idle"
-  deadman=$(status_value "$1" deadman) || deadman=unknown
+  deadman=$(status_or "$1" deadman unknown)
   case $armed in
     none)    anomaly stop-unarmed "$timer" "$deadman" ;;
     deadman) anomaly idle-unarmed "$timer" "$(local_hhmm "$2")" ;;
@@ -532,25 +555,57 @@ idle_detail() {
 }
 
 # --- Smoke check (pure) ------------------------------------------------------
-# uname_verdict <exit status> <output> -> illumos | other | failed | hostkey | wait
-# 255 is ssh's own failure: the guest isn't reachable yet (still booting, no
-# lease, sshd up before its user exists), so the poll goes on; only a
-# changed host key settles it.
-uname_verdict() {
-  case $1 in
-    0)   if [[ ${2//[[:space:]]/} == illumos ]]; then echo illumos; else echo other; fi ;;
-    255) if [[ $(ssh_error_class "$2") == hostkey ]]; then echo hostkey; else echo wait; fi ;;
-    *)   echo failed ;;
-  esac
-}
-
-# dtrace_verdict <exit status> <output> -> ok | failed | hostkey | wait
-dtrace_verdict() {
+# guest_ssh_verdict <exit status> <output> -> ok | failed | hostkey | wait,
+# for a command run on the guest. 255 is ssh's own failure: the guest isn't
+# reachable yet (still booting, no lease, sshd up before its user exists),
+# so the poll goes on; only a changed host key settles it.
+guest_ssh_verdict() {
   case $1 in
     0)   echo ok ;;
     255) if [[ $(ssh_error_class "$2") == hostkey ]]; then echo hostkey; else echo wait; fi ;;
     *)   echo failed ;;
   esac
+}
+
+# uname_verdict <exit status> <output> -> illumos | other | failed | hostkey | wait
+uname_verdict() {
+  local v
+  v=$(guest_ssh_verdict "$1" "$2")
+  case $v:${2//[[:space:]]/} in
+    ok:illumos) echo illumos ;;
+    ok:*)       echo other ;;
+    *)          echo "$v" ;;
+  esac
+}
+
+# dtrace_verdict <exit status> <output> -> ok | failed | hostkey | wait
+dtrace_verdict() { guest_ssh_verdict "$1" "$2"; }
+
+# smoke_part <smoke output> <uname|dtrace> -> "<exit status><US><output>" of
+# that check, from its marker line and the lines before it; fails when the
+# output has no marker for it
+smoke_part() {
+  local line text=''
+  while IFS= read -r line; do
+    case $line in
+      "$SMOKE_MARK $2 "*) printf '%s%s%s\n' "${line##* }" "$US" "$text"; return 0 ;;
+      "$SMOKE_MARK "*)    text='' ;;
+      *)                  text=${text:+$text$'\n'}$line ;;
+    esac
+  done <<< "$1"
+  return 1
+}
+
+# smoke_result <ssh exit status> <smoke output> <uname|dtrace> -> what one
+# check answered, as "<exit status><US><output>" for its verdict. When ssh
+# itself, or the remote shell, failed, its status and stderr stand for both
+# checks; a check with no marker (the shell stopped short) failed with "?".
+smoke_result() {
+  local part
+  if (( $1 != 0 )); then printf '%s%s%s\n' "$1" "$US" "$2"
+  elif part=$(smoke_part "$2" "$3"); then printf '%s\n' "$part"
+  else printf '?%s%s\n' "$US" "$2"
+  fi
 }
 
 # guest_attempts <verified: yes|no> -> polls for the guest: a first boot
@@ -588,38 +643,28 @@ probe_kind() { printf '%s\n' "${1%%$'\n'*}"; }
 probe_body() { [[ $1 != *$'\n'* ]] || printf '%s\n' "${1#*$'\n'}"; }
 
 # --- ssh ---------------------------------------------------------------------
-# remote_attempt <alias> <command> -> an Either, like aws_attempt: 0 with the
-# remote stdout, or the exit status with ssh's stderr (on stdout, for the
-# caller to classify). 255 is ssh's own failure; anything else is the remote
-# command's. stdin passes through: the push sends its bundle that way.
-remote_attempt() { ssh_capture "$1" "$2"; }
+# ssh_capture [options] <alias> [<command>] -> the entry's attempt, for any
+# call the contract allows (status's probe adds its -o options): 0 with the
+# remote stdout, or the exit status with ssh's stderr. 255 is ssh's own
+# failure; anything else is the remote command's. stdin passes through: the
+# push sends its bundle that way.
+ssh_capture() { attempt ssh -F "$SSH_CONFIG" "$@"; }
 
-# ssh_capture [options] <alias> <command> -> the same Either, for any call
-# the contract allows (status's probe adds its -o options)
-ssh_capture() {
-  local errf out rc=0
-  errf=$(mktemp "${TMPDIR:-/tmp}/helios-lab.XXXXXX") || return 1
-  out=$(ssh -F "$SSH_CONFIG" "$@" 2>"$errf") || rc=$?
-  (( rc == 0 )) || out=$(<"$errf")
-  rm -f "$errf"
-  printf '%s' "$out"
-  return "$rc"
-}
-
-# remote_call <alias> <command> <what it does> -> the remote stdout; dies
-# with a typed code otherwise (remote_fail)
+# remote_call <alias> <command> <what it does> [hint...] -> the remote
+# stdout; dies with a typed code otherwise (remote_fail)
 remote_call() {
   local out rc=0
-  out=$(remote_attempt "$1" "$2") || rc=$?
-  (( rc == 0 )) || remote_fail "$1" "$3" "$rc" "$out"
+  out=$(ssh_capture "$1" "$2") || rc=$?
+  (( rc == 0 )) || remote_fail "$1" "$3" "$rc" "$out" "${@:4}"
   printf '%s' "$out"
 }
 
-# remote_fail <alias> <what> <exit status> <stderr> — dies: ssh's own
-# failures by class, the remote command's with its exit status
+# remote_fail <alias> <what> <exit status> <stderr> [hint...] — dies: ssh's
+# own failures by class, the remote command's with its exit status, then
+# the hints
 remote_fail() {
   (( $3 != 255 )) || ssh_fail "$1" "$4"
-  die "$EX_FAIL" "$2 failed on the $1 (exit $3)" "the $1 said: $(first_line "$4")"
+  die "$EX_FAIL" "$2 failed on the $1 (exit $3)" "the $1 said: $(first_line "$4")" "${@:5}"
 }
 
 # ssh_fail <alias> <stderr> — dies: host key 6, network 8, others 1
@@ -648,7 +693,7 @@ ssh_fail() {
 # command runs it once the ingress refresh has admitted this Mac (up: in
 # up_existing and up_create; U3's ssh and console: ingress_refresh first).
 host_reach() {
-  [[ -n $2 && $2 != None ]] || die "$EX_FAIL" "$1 is running but has no public IPv4" 'helios-lab status shows the details'
+  present "$2" || die "$EX_FAIL" "$1 is running but has no public IPv4" 'helios-lab status shows the details'
   fragment_write "$1" "$2"
   hostkey_ensure "$1" "$2"
 }
@@ -719,13 +764,11 @@ offered_key_wait() {
     "its security group admits ssh only from this Mac's IP: helios-lab status says whether it still does"
 }
 
-# key_fingerprint <"ssh-ed25519 <base64>"> -> its SHA256 fingerprint
+# key_fingerprint <public-key line> -> its SHA256 fingerprint; fails on
+# anything ssh-keygen can't read as a public key
 key_fingerprint() {
-  local f line
-  f=$(mktemp "${TMPDIR:-/tmp}/helios-lab.XXXXXX") || return 1
-  printf '%s\n' "$1" > "$f"
-  line=$(ssh-keygen -lf "$f" 2>/dev/null) || line=''
-  rm -f "$f"
+  local line
+  line=$(ssh-keygen -lf - <<< "$1" 2>/dev/null) || return 1
   fingerprint_of "$line"
 }
 
@@ -784,7 +827,7 @@ push_bundle() {
 # that was interrupted): the follow below then attaches to that run
 provision_start() {
   local out rc=0
-  out=$(remote_attempt host "sudo systemctl start $PROVISION_UNIT" < /dev/null) || rc=$?
+  out=$(ssh_capture host "sudo systemctl start $PROVISION_UNIT" < /dev/null) || rc=$?
   (( rc != 0 )) || return 0
   (( rc != 255 )) || ssh_fail host "$out"
   provision_failed provision "systemctl start $PROVISION_UNIT failed: $(first_line "$out")"
@@ -833,7 +876,7 @@ host_poll() {
   local n out rc
   for (( n = 1; ; n++ )); do
     rc=0
-    out=$(remote_attempt host "$1" < /dev/null) || rc=$?
+    out=$(ssh_capture host "$1" < /dev/null) || rc=$?
     if (( rc == 0 )); then printf '%s' "$out"; return 0; fi
     if (( n >= POLL_TRIES )) || ! ssh_blip "$rc" "$out"; then
       remote_fail host "$2" "$rc" "$out"
@@ -857,7 +900,7 @@ provision_failed() {
 # detail to a report
 provision_journal() {
   local out
-  out=$(remote_attempt host "sudo $HOST_HELPER journal $1" < /dev/null) || out="(journal unavailable: $(first_line "$out"))"
+  out=$(ssh_capture host "sudo $HOST_HELPER journal $1" < /dev/null) || out="(journal unavailable: $(first_line "$out"))"
   printf '%s\n' "${out:-(the journal is empty)}"
 }
 
@@ -926,27 +969,30 @@ guest_wait() {
 }
 
 # smoke_check -> pass, or wait<US><why> while the guest can't be reached yet;
-# dies on an answer that settles it: not illumos, or DTrace failing
+# dies on an answer that settles it: not illumos, or DTrace failing. One
+# connection runs both checks; uname's verdict is read first.
 smoke_check() {
-  local out rc=0
-  out=$(remote_attempt guest "$SMOKE_UNAME" < /dev/null) || rc=$?
-  case $(uname_verdict "$rc" "$out") in
+  local out rc=0 answer status said
+  out=$(ssh_capture guest "$SMOKE_COMMAND" < /dev/null) || rc=$?
+  answer=$(smoke_result "$rc" "$out" uname)
+  status=${answer%%"$US"*} said=${answer#*"$US"}
+  case $(uname_verdict "$status" "$said") in
     illumos) ;;
-    wait)    smoke_wait "$out"; return 0 ;;
-    hostkey) ssh_fail guest "$out" ;;
-    other)   die "$EX_FAIL" "the guest is not Helios: uname -o printed '$(first_line "$out")', not illumos" \
+    wait)    smoke_wait "$said"; return 0 ;;
+    hostkey) ssh_fail guest "$said" ;;
+    other)   die "$EX_FAIL" "the guest is not Helios: uname -o printed '$(first_line "$said")', not illumos" \
                "the guest alias reaches HostName $GUEST_NAME through the host; see what that is: helios-lab ssh host getent hosts $GUEST_NAME" ;;
-    failed)  die "$EX_FAIL" "uname -o failed on the guest (exit $rc)" "the guest said: $(first_line "$out")" ;;
+    failed)  die "$EX_FAIL" "uname -o failed on the guest (exit $status)" "the guest said: $(first_line "$said")" ;;
   esac
-  rc=0
-  out=$(remote_attempt guest "$SMOKE_DTRACE" < /dev/null) || rc=$?
-  case $(dtrace_verdict "$rc" "$out") in
+  answer=$(smoke_result "$rc" "$out" dtrace)
+  status=${answer%%"$US"*} said=${answer#*"$US"}
+  case $(dtrace_verdict "$status" "$said") in
     ok)      echo pass ;;
-    wait)    smoke_wait "$out" ;;
-    hostkey) ssh_fail guest "$out" ;;
-    failed)  die "$EX_FAIL" "DTrace failed on the guest: $SMOKE_DTRACE exited $rc" \
+    wait)    smoke_wait "$said" ;;
+    hostkey) ssh_fail guest "$said" ;;
+    failed)  die "$EX_FAIL" "DTrace failed on the guest: $SMOKE_DTRACE exited $status" \
                "DTrace needs privileges, which pfexec grants through the guest user's Primary Administrator profile" \
-               "the guest said: $(first_line "$out")" ;;
+               "the guest said: $(first_line "$said")" ;;
   esac
 }
 
@@ -976,7 +1022,7 @@ guest_timeout() {
 # boot once more, so say so
 guest_abandon() {
   local out rc=0
-  out=$(remote_attempt host "sudo $HOST_HELPER guest-abandon" < /dev/null) || rc=$?
+  out=$(ssh_capture host "sudo $HOST_HELPER guest-abandon" < /dev/null) || rc=$?
   (( rc == 0 )) || warn "could not stop the first boot's create unit ($(first_line "$out")): the next up may wait on that guest again"
 }
 
@@ -992,18 +1038,8 @@ guest_mark_verified() {
 # the host's clock (which the idle check compares it with), or "off". The
 # host enforces the 12h cap itself; a helper older than U4 has no keep.
 keep_set() {
-  local out rc=0
-  out=$(remote_attempt host "sudo $HOST_HELPER keep $1" < /dev/null) || rc=$?
-  (( rc == 0 )) || keep_failed "$rc" "$out"
-  printf '%s\n' "$out"
-}
-
-# keep_failed <exit status> <stderr> — dies: ssh's own failures by class,
-# the helper's with a hint
-keep_failed() {
-  (( $1 != 255 )) || ssh_fail host "$2"
-  die "$EX_FAIL" "setting the keep failed on the host (exit $1)" "the host said: $(first_line "$2")" \
-    'a helper older than keep has none: helios-lab up pushes the current one'
+  remote_call host "sudo $HOST_HELPER keep $1" 'setting the keep' \
+    'a helper older than keep has none: helios-lab up pushes the current one' < /dev/null
 }
 
 # --- ssh and console sessions ------------------------------------------------
@@ -1037,7 +1073,7 @@ console_session() {
 host_probe() {
   local out rc=0
   [[ $3 == allowed ]] || { printf 'not-allowed\n%s\n' "$3"; return 0; }
-  [[ -n $2 && $2 != None ]] || { echo no-ip; return 0; }
+  present "$2" || { echo no-ip; return 0; }
   hostkey_pinned "$1" || { echo unpinned; return 0; }
   fragment_write "$1" "$2"
   out=$(ssh_capture -o "ConnectTimeout=$PROBE_TIMEOUT_S" -o BatchMode=yes host "sudo $HOST_HELPER status" < /dev/null) || rc=$?
@@ -1091,8 +1127,8 @@ probe_details() {
     ok)          detail provision "$(provision_detail "$(provision_state "$body")")"
                  detail idle "$(idle_detail "$body")"
                  detail guest "$(guest_detail "$body")"
-                 last=$(console_lines "$body" | tail -1)
-                 [[ -z $last ]] || detail console "${last:0:100}" ;;
+                 last=$(console_last "$body")
+                 [[ -z $last ]] || detail console "$last" ;;
     unreachable) detail host "no answer over ssh within ${PROBE_TIMEOUT_S}s" ;;
     failed)      detail host 'the status probe failed: helios-lab up pushes the current helper' ;;
     unpinned)    detail host 'its key is not pinned on this Mac yet: helios-lab up verifies it against the console' ;;
