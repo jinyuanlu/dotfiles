@@ -193,6 +193,75 @@ Scripts in `.claude/skills/bin/` used by skills internally:
 
 ---
 
+## Helios Lab
+
+`helios-lab` gives you a live illumos system to validate TLA+ specs against with DTrace and MDB. The Mac is ARM64, and helios-engvm runs only on x86 hosts, so the lab is one nested-virtualization EC2 host (Ubuntu 24.04 on an m8i, ap-northeast-1) running one Helios guest under helios-engvm. `up` takes it from any state to "guest booted and DTrace responds". `stop`, and an idle timer that a failed provision can't block, keep the cost near zero between sessions. The DTrace, MDB and RFD 26 steps are a runbook you type yourself: `helios-lab runbook` prints its path (`~/.local/share/helios-lab/runbook.md`).
+
+### One-time setup
+
+**`yadm pull` installs the command (`~/.local/bin/helios-lab`, support files in `~/.local/share/helios-lab/`). AWS credentials, a budget alert and the lab key are yours to set up once.**
+
+1. **CLI.** `brew bundle --global` installs `awscli` and `shellcheck` from `~/.Brewfile` (or run `brew install awscli`). Launching with nested virtualization needs aws-cli 2.33.21 or later. `~/.local/bin` must be on `PATH`; `~/bin/setup-pipx` (or `pipx ensurepath`) puts it there.
+2. **Identity.** Prefer a dedicated IAM user or IAM Identity Center (SSO) identity carrying the shipped least-privilege policy, `~/.local/share/helios-lab/iam-policy.json`. It is limited to ap-northeast-1, launches only tagged nested-virtualization types, and touches only lab-tagged resources afterwards. It never grants `iam:PassRole` or `ec2:ModifyInstanceAttribute`. Then point the `helios-lab` profile at that identity:
+
+   ```bash
+   aws configure --profile helios-lab         # access keys of the dedicated user
+   aws configure sso --profile helios-lab     # or: an SSO identity
+   aws sts get-caller-identity --profile helios-lab
+   ```
+
+   Reusing your existing keys in that profile also works. Root-account credentials are refused.
+3. **Budget alert.** In the Billing console, add an AWS Budgets monthly cost budget with an email alert. A few dollars above what you expect to spend is enough. It is the backstop if a host ever keeps billing unseen.
+4. **Lab key.** The first `helios-lab up` creates `~/.ssh/helios-lab_ed25519` and asks for a passphrase (so run it in a terminal). Or create it yourself first:
+
+   ```bash
+   ssh-keygen -t ed25519 -a 100 -f ~/.ssh/helios-lab_ed25519 -C helios-lab
+   ssh-add --apple-use-keychain ~/.ssh/helios-lab_ed25519
+   ```
+
+   **Back it up.** The guest accepts only this key, and helios-lab never regenerates it.
+
+Then `helios-lab up`. The first run takes about 10 minutes (instance, packages, KVM, helios-engvm, the 2.4 GB seed, first boot) and prints the RFD 26 link while the seed downloads. It shows the account, type and cost before it launches anything, and ends with `next: helios-lab ssh`.
+
+| Command | What it does |
+|---|---|
+| `helios-lab up [-v]` | Create or start the host, boot the guest, check DTrace (`-v` adds the host's provisioning journal) |
+| `helios-lab stop` | Stop the host; its disk and the guest are kept |
+| `helios-lab status` | State, cost so far and auto-stop time; anomalies first |
+| `helios-lab ssh [guest\|host] [cmd]` | SSH into the guest (default, as `ubuntu`; root via `pfexec`) or the host |
+| `helios-lab console` | Attach to the guest's serial console |
+| `helios-lab keep <duration>\|off` | Hold off the idle auto-stop (at most 12h), or clear it |
+| `helios-lab destroy [--yes]` | Preview what would be deleted; `--yes` deletes exactly that |
+| `helios-lab runbook` | Print the path of the DTrace and MDB runbook |
+| `helios-lab help` | One screen: commands and environment |
+
+| Env var | Effect |
+|---|---|
+| `HELIOS_LAB_PROFILE` | AWS profile (default `helios-lab`) |
+| `HELIOS_LAB_INSTANCE_TYPE` | Instance type, applied only at create (default `m8i.xlarge`). A non-metal c8i, m8i, r8i (or their `-flex`), c7i, m7i or r7i with at least 4 vCPU and 16 GiB |
+| `HELIOS_LAB_IDLE_MINUTES` | Minutes with no SSH session before the host stops itself (default 60; a multiple of 5 up to 720) |
+
+The region (ap-northeast-1), the 100 GB root and the key path are constants.
+
+| Cost (ap-northeast-1, approximate, as of 2026-10-23) | |
+|---|---|
+| m8i.xlarge running (4 vCPU, 16 GiB; the guest gets 3 vCPU, 8 GiB) | ≈$0.27/hr, plus $0.005/hr for the public IPv4 |
+| m8i.2xlarge / c8i.2xlarge running | ≈$0.55/hr / ≈$0.47/hr |
+| Stopped: the 100 GB encrypted gp3 root | ≈$9.60/month (≈$0.32/day) |
+| First `up` | ≈10 min to guest ready |
+| `up` after a stop | ≈40 s to guest ready |
+
+Safety notes:
+
+- **`destroy` previews first.** Without `--yes` it only lists the instance, volume and security group and exits 2. `--yes` deletes exactly that, and the guest's disk goes with it. The lab key is never touched.
+- **`ssh`, `console` and `keep` never start a stopped host.** They say why it stopped (idle or you) and point at `helios-lab up`. Only `up` starts billing.
+- **The idle stop ends disconnected work.** No SSH session for the idle window means the host stops, and a guest job left running stops with it. Use `helios-lab keep 3h` before you walk away from a long run.
+- **Losing the lab key locks the guest out for good.** The key is baked into the guest when it is created, and it is never regenerated. Restoring a backup is the only fix short of `destroy`.
+- **One Mac at a time.** SSH ingress follows the Mac that last connected, and only the creating Mac's key is authorized.
+- **This repo is public.** `.gitignore` keeps `~/.local/state/` (the SSH fragment and pinned host keys) and the lab key out of `yadm add`. No credential, and no pointer to one, belongs in it.
+
+---
+
 ## Karabiner Keyboard Shortcuts Cheatsheet
 
 ### Emacs-style Navigation

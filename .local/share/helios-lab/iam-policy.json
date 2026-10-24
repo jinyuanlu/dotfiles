@@ -1,0 +1,182 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadLabState",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeVolumes",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSecurityGroupRules",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeInstanceTypeOfferings"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-northeast-1"
+        }
+      }
+    },
+    {
+      "Sid": "ResolveUbuntuImage",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameters"
+      ],
+      "Resource": "arn:aws:ssm:ap-northeast-1::parameter/aws/service/canonical/ubuntu/server/24.04/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-northeast-1"
+        }
+      }
+    },
+    {
+      "Sid": "LaunchTaggedNestedVirtInstance",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:RunInstances"
+      ],
+      "Resource": "arn:aws:ec2:ap-northeast-1:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-northeast-1",
+          "aws:RequestTag/Project": "helios-lab"
+        },
+        "StringLike": {
+          "ec2:InstanceType": [
+            "c8i.*",
+            "m8i.*",
+            "r8i.*",
+            "c8i-flex.*",
+            "m8i-flex.*",
+            "r8i-flex.*",
+            "c7i.*",
+            "m7i.*",
+            "r7i.*"
+          ]
+        },
+        "StringNotLike": {
+          "ec2:InstanceType": "*.metal*"
+        }
+      }
+    },
+    {
+      "Sid": "LaunchTaggedRootVolume",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:RunInstances"
+      ],
+      "Resource": "arn:aws:ec2:ap-northeast-1:*:volume/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-northeast-1",
+          "aws:RequestTag/Project": "helios-lab"
+        }
+      }
+    },
+    {
+      "Sid": "LaunchUsingImageSubnetGroupAndInterface",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:RunInstances"
+      ],
+      "Resource": [
+        "arn:aws:ec2:ap-northeast-1::image/*",
+        "arn:aws:ec2:ap-northeast-1:*:subnet/*",
+        "arn:aws:ec2:ap-northeast-1:*:security-group/*",
+        "arn:aws:ec2:ap-northeast-1:*:network-interface/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-northeast-1"
+        }
+      }
+    },
+    {
+      "Sid": "CreateTaggedSecurityGroup",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateSecurityGroup"
+      ],
+      "Resource": "arn:aws:ec2:ap-northeast-1:*:security-group/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-northeast-1",
+          "aws:RequestTag/Project": "helios-lab"
+        }
+      }
+    },
+    {
+      "Sid": "CreateSecurityGroupInVpc",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateSecurityGroup"
+      ],
+      "Resource": "arn:aws:ec2:ap-northeast-1:*:vpc/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-northeast-1"
+        }
+      }
+    },
+    {
+      "Sid": "TagOnlyInTheCreatingCall",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateTags"
+      ],
+      "Resource": [
+        "arn:aws:ec2:ap-northeast-1:*:instance/*",
+        "arn:aws:ec2:ap-northeast-1:*:volume/*",
+        "arn:aws:ec2:ap-northeast-1:*:security-group/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-northeast-1",
+          "ec2:CreateAction": [
+            "RunInstances",
+            "CreateSecurityGroup"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "OperateLabInstance",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:TerminateInstances",
+        "ec2:GetConsoleOutput"
+      ],
+      "Resource": "arn:aws:ec2:ap-northeast-1:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-northeast-1",
+          "ec2:ResourceTag/Project": "helios-lab"
+        }
+      }
+    },
+    {
+      "Sid": "OperateLabSecurityGroup",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:DeleteSecurityGroup"
+      ],
+      "Resource": "arn:aws:ec2:ap-northeast-1:*:security-group/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-northeast-1",
+          "ec2:ResourceTag/Project": "helios-lab"
+        }
+      }
+    }
+  ]
+}

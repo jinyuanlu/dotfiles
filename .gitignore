@@ -3,3 +3,6 @@
 .claude/skills/.gstack-sync-state
 .claude/skills/browse/dist/
 .claude/skills/browse/node_modules/
+# helios-lab: its Mac-side state and the lab key never belong in this public repo
+.local/state/
+.ssh/helios-lab_ed25519*

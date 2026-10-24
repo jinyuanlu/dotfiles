@@ -24,7 +24,13 @@
 #   service and operation first, --region ap-northeast-1, a --profile, --output text.
 #
 # Env: STUB_AWS_DIR (the scenario's replies), STUB_LOG (one line per call:
-# "aws <args>").
+# "aws <args>"), STUB_AWS_LEDGER (optional, suite-wide: see below).
+#
+# Ledger: tests/run points STUB_AWS_LEDGER at one file for the whole suite.
+# Every call that passes the contract appends "<service> <operation>" there
+# ("<service> wait <waiter>" for a waiter), whether or not a reply exists,
+# because the code under test did make it. policy.test.sh, which the runner
+# runs last, checks those calls against the shipped IAM policy.
 set -euo pipefail
 
 # shellcheck source=../stub-replay.sh
@@ -46,4 +52,7 @@ if [[ ${1:-} == --version ]]; then
   stub_replay "${STUB_AWS_DIR:?STUB_AWS_DIR is not set}" version
 fi
 check_contract "$@"
+if [[ -n ${STUB_AWS_LEDGER:-} ]]; then
+  if [[ $2 == wait ]]; then echo "$1 $2 ${3:-}"; else echo "$1 $2"; fi >> "$STUB_AWS_LEDGER"
+fi
 stub_replay "${STUB_AWS_DIR:?STUB_AWS_DIR is not set}" "$1-$2"

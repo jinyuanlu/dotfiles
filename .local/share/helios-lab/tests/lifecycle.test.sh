@@ -2,7 +2,7 @@
 # shellcheck source-path=SCRIPTDIR
 #
 # lifecycle.test.sh — U1: state -> action, discovery, stop cause, cost, status
-# and help. Pure functions are called directly after load_cli; CLI scenarios
+# and help; U5: runbook (the IAM policy is policy.test.sh's). Pure functions are called directly after load_cli; CLI scenarios
 # run the real entry against the aws and curl stubs. Replies come from
 # fixtures/derived/ (the CLI's text output for real captures) and are varied
 # with set_field, never hand-written, except where noted.
@@ -341,11 +341,41 @@ test_unknown_command_and_status_arguments_are_usage_errors() {
   assert_eq '' "$(calls)"
 }
 
-test_unimplemented_commands_exit_1_naming_their_unit() {
-  run_cli runbook   # keep arrived with U4 (idle.test.sh)
-  assert_rc 1
-  assert_contains "$ERR" 'runbook: not implemented yet (U5)'
+# --- runbook (U5) ------------------------------------------------------------
+test_runbook_prints_its_absolute_path_under_the_library_home() {
+  run_cli runbook
+  assert_rc 0
+  assert_eq "$HELIOS_LAB_HOME/runbook.md" "$OUT"
+  [[ $OUT == /* && -f $OUT ]] || fail "not an existing absolute path: $OUT"
   assert_eq '' "$(calls)"
+}
+
+test_runbook_missing_names_the_expected_path_and_exits_1() {
+  local home=$SANDBOX/share
+  mkdir -p "$home"
+  ln -s "$HELIOS_LAB_HOME/lib" "$home/lib"   # the libraries, but no runbook
+  export HELIOS_LAB_HOME=$home
+  run_cli runbook
+  assert_rc 1
+  assert_eq '' "$OUT"
+  assert_contains "$ERR" "the runbook is missing: expected $home/runbook.md"
+  assert_eq '' "$(calls)"
+}
+
+test_runbook_takes_no_arguments() {
+  run_cli runbook --open
+  assert_rc 2
+  assert_contains "$ERR" 'runbook takes no arguments'
+}
+
+# The runbook and the command say the same things: up's RFD 26 hint and the
+# ready screen's DTrace one-liner both point into it (R11).
+test_runbook_carries_the_rfd_26_link_and_the_ready_screens_one_liner() {
+  load_cli
+  local text
+  text=$(<"$HELIOS_LAB_HOME/runbook.md")
+  assert_contains "$text" "$RFD26_URL"
+  assert_contains "$text" "$DTRACE_TRY"
 }
 
 test_aws_errors_map_to_typed_exit_codes_with_a_hint() {

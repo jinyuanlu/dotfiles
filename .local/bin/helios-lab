@@ -779,6 +779,18 @@ destroy_confirm_volumes() {
     'they bill as storage until deleted: delete them in the EC2 console (helios-lab never deletes a volume itself)'
 }
 
+# --- runbook -----------------------------------------------------------------
+# The hands-on DTrace, MDB and RFD 26 steps (R11) ship beside the libraries.
+# Only the path is printed, so it composes: less "$(helios-lab runbook)".
+readonly RUNBOOK="$HELIOS_LAB_HOME/runbook.md"
+
+cmd_runbook() {
+  (( $# == 0 )) || die "$EX_USAGE" 'runbook takes no arguments' "try: $SELF help"
+  [[ -r $RUNBOOK ]] || die "$EX_FAIL" "the runbook is missing: expected $RUNBOOK" \
+    'run yadm pull, or set HELIOS_LAB_HOME'
+  echo "$RUNBOOK"
+}
+
 # --- help --------------------------------------------------------------------
 cmd_help() {
   cat <<EOF
@@ -789,7 +801,7 @@ usage: $SELF <command>
 commands:
   up [-v]                 create or start the host, boot the guest, check DTrace
                           (-v also prints the host's provisioning journal)
-  stop                  stop the host; its disk and the guest are kept
+  stop                    stop the host; its disk and the guest are kept
   status                  state, cost so far and auto-stop time; anomalies first
   ssh [guest|host] [cmd]  ssh into the guest (default) or the host
   console                 attach to the guest's serial console
@@ -810,10 +822,6 @@ EOF
 }
 
 # --- Dispatch ----------------------------------------------------------------
-# not_yet <unit> <command> — dispatch is complete from U1 on; later units
-# replace these stubs one by one.
-not_yet() { die "$EX_FAIL" "$2: not implemented yet ($1)"; }
-
 main() {
   local cmd=${1:-}
   case $cmd in
@@ -831,7 +839,7 @@ main() {
     ssh)             cmd_ssh "$@" ;;
     console)         cmd_console "$@" ;;
     keep)            cmd_keep "$@" ;;
-    runbook)         not_yet U5 "$cmd" ;;
+    runbook)         cmd_runbook "$@" ;;
     *)               die "$EX_USAGE" "unknown command: $cmd" "try: $SELF help" ;;
   esac
 }

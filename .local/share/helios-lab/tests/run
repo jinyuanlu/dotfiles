@@ -7,6 +7,12 @@
 #   .local/share/helios-lab/tests/run            # all test files
 #   .local/share/helios-lab/tests/run lifecycle  # files matching *lifecycle*
 #
+# policy.test.sh always runs last, whatever order the glob gives the rest: it
+# checks the shipped IAM policy against the ledger of aws calls every earlier
+# file made (STUB_AWS_LEDGER, tests/stubs/aws). Only an unfiltered run records
+# the whole suite, so only then does it also require every granted action to
+# be exercised (STUB_AWS_LEDGER_COMPLETE=yes).
+#
 # Safety: no test may reach AWS, a host or the network. tests/stubs goes
 # first on PATH, and the run refuses to start unless every network tool the
 # command could run resolves there: aws, curl, ssh, ssh-keyscan, and scp
@@ -39,15 +45,23 @@ done
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/helios-lab-tests.XXXXXX")
 export TEST_TMP TEST_RESULTS=$TEST_TMP/results HELIOS_LAB_STATE_DIR=$TEST_TMP/state
 trap 'rm -rf "$TEST_TMP"' EXIT
+export STUB_AWS_LEDGER=$TEST_TMP/aws-calls STUB_AWS_LEDGER_COMPLETE=no
+: > "$STUB_AWS_LEDGER"
+[[ -n ${1:-} ]] || STUB_AWS_LEDGER_COMPLETE=yes
 
 # --- Tests -------------------------------------------------------------------
 # A file that dies before reporting (say, a syntax error) counts as a failure.
-broken=0
+readonly LAST=$TESTS_DIR/policy.test.sh
+broken=0 last_due=no
+run_file() {
+  echo "${1##*/}"
+  /bin/bash "$1" || { broken=$(( broken + 1 )); echo "  FAIL  ${1##*/} exited non-zero"; }
+}
 for file in "$TESTS_DIR"/*"${1:-}"*.test.sh; do
   [[ -e $file ]] || die "no test files match '${1:-}'"
-  echo "${file##*/}"
-  /bin/bash "$file" || { broken=$(( broken + 1 )); echo "  FAIL  ${file##*/} exited non-zero"; }
+  if [[ $file == "$LAST" ]]; then last_due=yes; else run_file "$file"; fi
 done
+[[ $last_due == no ]] || run_file "$LAST"
 
 passed=0 failed=0
 if [[ -f $TEST_RESULTS ]]; then
