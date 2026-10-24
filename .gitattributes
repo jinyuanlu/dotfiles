@@ -4,3 +4,4 @@
 .claude/skills/trading-trigger/*.md filter=git-crypt diff=git-crypt
 .claude/personas/*.md filter=git-crypt diff=git-crypt
 .hermes/SOUL.md filter=git-crypt diff=git-crypt
+docs/plans/** filter=git-crypt diff=git-crypt
