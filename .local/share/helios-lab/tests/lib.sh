@@ -17,11 +17,14 @@ readonly DERIVED="$FIXTURES/derived"
 readonly COL_STATE=2 COL_LAUNCH=6 COL_REASON=9
 
 # --- Sandbox and runner ------------------------------------------------------
+# Every test gets its own HOME, so the fixed lab-key path ~/.ssh/... resolves
+# inside the sandbox and no test can read or write the real ~/.ssh. Retries
+# don't sleep.
 new_sandbox() {
   SANDBOX=$(mktemp -d "$TEST_TMP/t.XXXXXX")
   export STUB_AWS_DIR=$SANDBOX/aws STUB_CURL_DIR=$SANDBOX/curl STUB_LOG=$SANDBOX/calls.log
-  export HELIOS_LAB_STATE_DIR=$SANDBOX/state
-  mkdir -p "$STUB_AWS_DIR" "$STUB_CURL_DIR"
+  export HELIOS_LAB_STATE_DIR=$SANDBOX/state HOME=$SANDBOX/home HELIOS_LAB_RETRY_SECONDS=0
+  mkdir -p "$STUB_AWS_DIR" "$STUB_CURL_DIR" "$HOME"
   : > "$STUB_LOG"
 }
 
@@ -49,10 +52,24 @@ load_cli() {
   source "$HELIOS_LAB_BIN"
 }
 
-# run_cli <args...> — run the real entry; sets OUT, ERR and RC (never aborts)
+# run_cli <args...> — run the real entry; sets OUT, ERR and RC (never aborts).
+# stdin is /dev/null: no test may ever reach an interactive prompt.
 run_cli() {
   RC=0
-  OUT=$("$HELIOS_LAB_BIN" "$@" 2>"$SANDBOX/stderr") || RC=$?
+  OUT=$("$HELIOS_LAB_BIN" "$@" 2>"$SANDBOX/stderr" < /dev/null) || RC=$?
+  ERR=$(<"$SANDBOX/stderr")
+}
+
+# run_fn <function> [args...] — after load_cli, run one function of the entry
+# in a subshell, like run_cli runs the whole entry; sets OUT, ERR and RC. A
+# test can redefine an extension point first. errexit must stay on inside, so
+# the subshell can't sit in an `||` list (bash ignores -e there).
+run_fn() {
+  set +e
+  ( set -e; "$@" ) > "$SANDBOX/stdout" 2> "$SANDBOX/stderr" < /dev/null
+  RC=$?
+  set -e
+  OUT=$(<"$SANDBOX/stdout")
   ERR=$(<"$SANDBOX/stderr")
 }
 
@@ -106,6 +123,14 @@ reply() { if (( $# > 1 )); then cp "$2" "$STUB_AWS_DIR/$1"; else cat > "$STUB_AW
 
 # reply_error <name> <exit> <stderr> — a failing call
 reply_error() { printf '%s\n' "$3" > "$STUB_AWS_DIR/$1.stderr"; echo "$2" > "$STUB_AWS_DIR/$1.exit"; }
+
+# reply_seq <name> <n> [file] — the reply to the nth call to <name> only
+# (stub-replay.sh: <name>.N wins over <name> for call N); an empty stdin
+# makes an empty reply
+reply_seq() { reply "$1.$2" ${3:+"$3"}; }
+
+# reply_error_seq <name> <n> <exit> <stderr> — the nth call to <name> fails
+reply_error_seq() { reply_error "$1.$2" "$3" "$4"; }
 
 # caller_ip_is <text> — what checkip answers; caller_ip_fails — curl exits 7
 caller_ip_is() { printf '%s\n' "$1" > "$STUB_CURL_DIR/curl"; }

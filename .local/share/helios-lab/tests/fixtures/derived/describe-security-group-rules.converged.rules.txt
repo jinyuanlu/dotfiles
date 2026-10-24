@@ -1,0 +1,3 @@
+sgr-0123456789abcdef0	True	tcp	80	80	0.0.0.0/0
+sgr-0123456789abcdef0	True	tcp	443	443	0.0.0.0/0
+sgr-0123456789abcdef0	False	tcp	22	22	203.0.113.10/32

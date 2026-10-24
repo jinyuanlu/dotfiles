@@ -1,0 +1,26 @@
+#!/bin/bash
+#
+# sanitize-capture <raw-file> — print an AWS CLI capture with every account,
+# resource ID, IP, MAC and internal hostname replaced by a fixed synthetic
+# value, so it can be committed to this PUBLIC repo as a test fixture:
+#
+#   tests/sanitize-capture raw/describe-instances.json \
+#     > tests/fixtures/describe-instances.running.json
+#
+# Resource IDs are matched generically (any `word-…-<8..17 hex>`), not from a
+# prefix list: a list missed `dopt-` and `vpc-cidr-assoc-` once. Still grep
+# the result for the real values you know before committing.
+set -euo pipefail
+(( $# == 1 )) || { echo 'usage: sanitize-capture <raw-file>' >&2; exit 2; }
+exec perl -pe '
+  s/\b\d{12}\b/123456789012/g;                                   # account IDs
+  s/\b((?:[a-z]+-)+)[0-9a-f]{8,17}\b/${1}0123456789abcdef0/g;    # every resource ID
+  s/\b(AIDA|AKIA|ASIA|AROA)[A-Z0-9]{12,}\b/$1EXAMPLEEXAMPLE00/g; # IAM unique / key IDs
+  s{(arn:aws:iam::123456789012:user/)[A-Za-z0-9+=,.\@_-]+}{${1}helios-lab}g;
+  s/\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b/0a:00:00:00:00:01/g;      # MACs
+  s/\bip-\d+-\d+-\d+-\d+\b/ip-172-31-0-10/g;                     # internal hostnames
+  s/\bec2-\d+-\d+-\d+-\d+\b/ec2-203-0-113-10/g;
+  s/\b172\.31\.\d+\.\d+\b/172.31.0.10/g;                         # VPC-private IPv4
+  s/\b(?!(?:0|10|127|169\.254|172\.31|192\.168|255)\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/203.0.113.10/g;
+  s/"ClientToken": "[^"]+"/"ClientToken": "00000000-0000-0000-0000-000000000000"/g;
+' "$1"

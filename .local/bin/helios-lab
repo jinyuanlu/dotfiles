@@ -11,30 +11,36 @@
 # bash 3.2 (no associative arrays, mapfile, ${v,,}, declare -n or &>>), and
 # AWS output is shaped with the CLI's own --query / --output text.
 #
-# Layout: this file holds config, status orchestration and dispatch. Pure
-# decisions live in lib/state.sh, every AWS call in lib/aws.sh, both under
+# Layout: this file holds config, the lock, the lab key, the orchestration of
+# each command, and dispatch. Pure decisions live in lib/state.sh and
+# lib/render.sh, every AWS call in lib/aws.sh, all under
 # ${HELIOS_LAB_HOME:-~/.local/share/helios-lab}.
 #
 # Exit codes (typed, so scripts and tests can tell failures apart):
 #   0  ok
 #   1  generic failure
-#   2  usage: unknown command, bad argument or bad env value
-#   3  AWS auth: missing or invalid credentials, expired SSO, permission denied
-#   4  state conflict, e.g. more than one lab instance
-#   5  capacity: EC2 has no capacity for the type (U6)
+#   2  usage: unknown command, bad argument or bad env value; also destroy's
+#      preview without --yes, and up run without a terminal when the lab key
+#      must first be created
+#   3  AWS auth: missing or invalid credentials, expired SSO, permission
+#      denied, root credentials
+#   4  state conflict: more than one lab instance, the lab key missing or not
+#      the instance's, another up/stop/destroy holding the lock
+#   5  capacity: EC2 has no capacity for the type, or no zone offers it
 #   6  host-key verification failure (U2)
-#   8  network: AWS unreachable
+#   8  network: AWS or checkip unreachable
 #
 # Env (the only knobs; region, root size and key path are constants):
 #   HELIOS_LAB_PROFILE        AWS profile (default: helios-lab)
 #   HELIOS_LAB_INSTANCE_TYPE  instance type, applied only at create (default: m8i.xlarge)
 #   HELIOS_LAB_IDLE_MINUTES   idle minutes before the host stops itself (default: 60)
-# For tests: HELIOS_LAB_HOME (library dir), HELIOS_LAB_STATE_DIR (state dir).
+# For tests: HELIOS_LAB_HOME (library dir), HELIOS_LAB_STATE_DIR (state dir),
+# HELIOS_LAB_RETRY_SECONDS (wait between security-group delete attempts, default 10).
 #
 set -euo pipefail
 
 readonly SELF=helios-lab
-# shellcheck disable=SC2034  # the whole table lives here; U2 and U6 raise 5 and 6
+# shellcheck disable=SC2034  # the whole table lives here; U2 raises 6
 readonly EX_OK=0 EX_FAIL=1 EX_USAGE=2 EX_AUTH=3 EX_CONFLICT=4 EX_CAPACITY=5 EX_HOSTKEY=6 EX_NET=8
 
 warn() { printf '%s: %s\n' "$SELF" "$1" >&2; }
@@ -54,19 +60,27 @@ die() {
 # Sourced from the yadm-deployed share dir. Tests point HELIOS_LAB_HOME at the
 # repo checkout, so they exercise the working tree, not an installed copy.
 readonly HELIOS_LAB_HOME="${HELIOS_LAB_HOME:-$HOME/.local/share/helios-lab}"
-[[ -r $HELIOS_LAB_HOME/lib/state.sh && -r $HELIOS_LAB_HOME/lib/aws.sh ]] \
+[[ -r $HELIOS_LAB_HOME/lib/state.sh && -r $HELIOS_LAB_HOME/lib/aws.sh && -r $HELIOS_LAB_HOME/lib/render.sh ]] \
   || die "$EX_FAIL" "libraries not found in $HELIOS_LAB_HOME/lib" 'run yadm pull, or set HELIOS_LAB_HOME'
 # shellcheck source=../share/helios-lab/lib/state.sh
 source "$HELIOS_LAB_HOME/lib/state.sh"
 # shellcheck source=../share/helios-lab/lib/aws.sh
 source "$HELIOS_LAB_HOME/lib/aws.sh"
+# shellcheck source=../share/helios-lab/lib/render.sh
+source "$HELIOS_LAB_HOME/lib/render.sh"
 
 # --- Configuration -----------------------------------------------------------
 readonly PROFILE="${HELIOS_LAB_PROFILE:-helios-lab}"
 readonly INSTANCE_TYPE="${HELIOS_LAB_INSTANCE_TYPE:-m8i.xlarge}"
 readonly IDLE_MINUTES="${HELIOS_LAB_IDLE_MINUTES:-60}"
-# shellcheck disable=SC2034  # U2 (known_hosts) and U6 (lock) live here; U1 only reads AWS
 readonly STATE_DIR="${HELIOS_LAB_STATE_DIR:-$HOME/.local/state/helios-lab}"
+# The lab key lives at one fixed path (plan: "Where state lives"), so every
+# command and every Mac agrees on it. destroy never touches it.
+readonly LAB_KEY="$HOME/.ssh/helios-lab_ed25519"
+# destroy retries the group delete for 12 x 10 s: a terminated instance's ENI
+# can hold the group for a minute or two.
+readonly SG_DELETE_ATTEMPTS=12
+readonly RETRY_SECONDS="${HELIOS_LAB_RETRY_SECONDS:-10}"
 
 # validate_config — fail fast on a bad knob, before any AWS call
 validate_config() {
@@ -75,6 +89,119 @@ validate_config() {
     "use a non-metal size of one of: $(nested_virt_families)"
   idle_minutes_ok "$IDLE_MINUTES" || die "$EX_USAGE" \
     "HELIOS_LAB_IDLE_MINUTES=$IDLE_MINUTES is not a multiple of 5 between 5 and 720"
+  [[ $RETRY_SECONDS =~ ^[0-9]{1,3}$ ]] || die "$EX_USAGE" \
+    "HELIOS_LAB_RETRY_SECONDS=$RETRY_SECONDS is not a whole number of seconds"
+}
+
+# --- Lock and exit notice ----------------------------------------------------
+# up, stop and destroy --yes hold a lock in the state dir, so one Mac never
+# runs two of them at once. With discovery and the post-launch re-lookup, it
+# keeps the invariant "at most one live tagged instance". macOS has no
+# flock(1); shlock creates the lock with an atomic link(2) and takes over one
+# whose PID is dead.
+readonly SHLOCK=/usr/bin/shlock
+readonly LOCK_FILE="$STATE_DIR/lock"
+
+# lock_acquire — the traps go first, so the lock can't outlive this process
+# even if a signal lands right after it is taken
+lock_acquire() {
+  [[ -x $SHLOCK ]] || die "$EX_FAIL" "$SHLOCK not found: helios-lab locks with macOS's shlock"
+  [[ -d $STATE_DIR ]] || { mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"; }
+  trap on_exit EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  "$SHLOCK" -p "$$" -f "$LOCK_FILE" || die "$EX_CONFLICT" \
+    "another helios-lab up, stop or destroy is running (pid $(cat "$LOCK_FILE" 2>/dev/null || echo unknown))" \
+    'wait for it to finish; once that process is gone, the next run takes the lock over'
+}
+
+# lock_release — only our own lock, never another process's
+lock_release() {
+  if [[ $(cat "$LOCK_FILE" 2>/dev/null) == "$$" ]]; then rm -f "$LOCK_FILE"; fi
+}
+
+# on_exit [<instance-id|""> <type> <launch-epoch>] — the EXIT trap. Once up
+# holds a host that may be billing (arm_notice), a failure or Ctrl-C prints
+# the billing notice; then the lock goes. set +e because a failing command in
+# an EXIT trap would replace the exit status.
+on_exit() {
+  local rc=$?
+  set +e
+  if (( $# > 0 )) && notice_due "$rc" "$1"; then billing_notice "$@" >&2; fi
+  lock_release
+}
+
+# arm_notice <instance-id|""> <type> <launch-epoch|""> — from here on, a
+# failure or Ctrl-C says the host is billing. "" means a launch or start call
+# is in flight. The values are quoted into the trap now, on purpose.
+# shellcheck disable=SC2064
+arm_notice() { trap "on_exit $(printf '%q ' "$@")" EXIT; }
+
+# notice_due <exit-status> <instance-id|""> -> 0 when the notice must print.
+# A known host: on any failure. A call in flight: only when its outcome is
+# unknown (network error or a signal); a service error means EC2 refused it.
+notice_due() {
+  (( $1 != 0 )) || return 1
+  [[ -z $2 ]] || return 0
+  (( $1 == EX_NET || $1 > 128 ))
+}
+
+# --- Lab key -----------------------------------------------------------------
+# Invariant: the lab key is never regenerated while a tagged instance exists.
+# Only the create path (no instance) may generate it; every other path checks
+# it against the instance's KeyFingerprint tag and names destroy on failure.
+
+# lab_key_fingerprint -> the key's SHA256 fingerprint, or nothing when either
+# half is missing or unreadable (state.sh lab_key_verdict says "missing")
+lab_key_fingerprint() {
+  local line
+  [[ -f $LAB_KEY && -f $LAB_KEY.pub ]] || return 0
+  line=$(ssh-keygen -lf "$LAB_KEY.pub" 2>/dev/null) || return 0
+  fingerprint_of "$line" || return 0
+}
+
+# lab_key_require_pub — the private half alone is not lost: say how to rebuild the public half
+lab_key_require_pub() {
+  [[ ! -f $LAB_KEY || -f $LAB_KEY.pub ]] || die "$EX_FAIL" "the lab key's public half $LAB_KEY.pub is missing" \
+    "rebuild it from the private key: ssh-keygen -y -f $LAB_KEY > $LAB_KEY.pub"
+}
+
+# lab_key_ensure — create path only (no instance exists): reuse the key at
+# the fixed path, or generate it. ssh-keygen asks for the passphrase itself,
+# which needs a terminal.
+lab_key_ensure() {
+  lab_key_require_pub
+  [[ ! -f $LAB_KEY ]] || return 0
+  [[ -t 0 ]] || die "$EX_USAGE" "the lab key $LAB_KEY does not exist yet, and creating it asks for a passphrase" \
+    'run helios-lab up in a terminal'
+  [[ -d $HOME/.ssh ]] || mkdir -m 700 "$HOME/.ssh"
+  echo "creating the lab key $LAB_KEY (ed25519): choose a passphrase"
+  ssh-keygen -q -t ed25519 -a 100 -C helios-lab -f "$LAB_KEY" \
+    || die "$EX_FAIL" "ssh-keygen could not create $LAB_KEY; nothing was created in AWS"
+  if ssh-keygen -y -P '' -f "$LAB_KEY" >/dev/null 2>&1; then
+    warn "$LAB_KEY has no passphrase; add one any time: ssh-keygen -p -f $LAB_KEY"
+  fi
+  echo "back up $LAB_KEY: the guest accepts only this key, and helios-lab never regenerates it"
+}
+
+# lab_key_check <instance-id> — the key must be the one the instance was created with
+lab_key_check() {
+  local tag fp
+  tag=$(aws_instance_key_tag "$1")
+  lab_key_require_pub
+  fp=$(lab_key_fingerprint)
+  case $(lab_key_verdict "$fp" "$tag") in
+    ok)       return 0 ;;
+    missing)  key_lost "the lab key $LAB_KEY is missing, and lab instance $1 exists" ;;
+    mismatch) key_lost "the lab key $LAB_KEY ($fp) is not the key $1 was created with (${tag/#None/no KeyFingerprint tag})" ;;
+  esac
+}
+
+# key_lost <message> — dies naming destroy as the only recovery
+key_lost() {
+  die "$EX_CONFLICT" "$1" 'the guest accepts only the key it was created with, and helios-lab never regenerates it' \
+    'restore the key from your backup, or start over: helios-lab destroy (the instance, its disk and the guest go)'
 }
 
 # --- Discovery ---------------------------------------------------------------
@@ -154,6 +281,270 @@ ip_anomaly() {
   ingress_allows "$ip" "$rules" || anomaly ip-not-allowed "$ip"
 }
 
+# --- up ----------------------------------------------------------------------
+# Converges from any EC2 state to "host running" by the state machine in
+# state.sh (up_action), then hands over to the U2/U3 extension point.
+cmd_up() {
+  (( $# == 0 )) || die "$EX_USAGE" 'up takes no arguments'
+  lock_acquire
+  local row id state type az ip launch rest
+  row=$(discover_single)
+  IFS=$US read -r id state type az ip launch rest <<< "$row"
+  case $(up_action "${state:-absent}") in
+    create)           up_create ;;
+    wait-then-create) up_wait "$id" instance-terminated terminating; up_create ;;
+    start)            up_existing "$row"; up_start "$id" "$type" "$az" ;;
+    wait-then-start)  up_existing "$row"; up_wait "$id" instance-stopped stopping; up_start "$id" "$type" "$az" ;;
+    none)             up_existing "$row"
+                      arm_notice "$id" "$type" "$(launch_epoch "$launch" "$(date +%s)")"
+                      up_running "$id" '' ;;
+  esac
+}
+
+# up_wait <instance-id> <waiter> <doing> — wait out a transition before acting
+up_wait() {
+  echo "waiting for $1 to finish $3"
+  aws_wait "$2" --instance-ids "$1"
+}
+
+# up_existing <row> — before a known instance costs anything more: its key
+# must be the lab key, the type override can't apply, and the group admits
+# exactly this Mac (the ingress refresh every connecting command runs)
+up_existing() {
+  local id state type az ip launch group rest note caller
+  IFS=$US read -r id state type az ip launch group rest <<< "$1"
+  lab_key_check "$id"
+  note=$(type_override_note "${HELIOS_LAB_INSTANCE_TYPE:-}" "$type" "$id")
+  [[ -z $note ]] || warn "$note"
+  [[ -n $group && $group != None ]] || die "$EX_FAIL" "$id has no security group" 'helios-lab status shows the details'
+  caller=$(caller_ip_or_die)
+  sg_converge "$group" "$caller"
+}
+
+# up_create — absent: preflight (the cost line before the dry-run), the lab
+# key, the group, then one launch
+up_create() {
+  check_guest_fits
+  local cli account vpc placement caller fp found group
+  cli=$(preflight_cli)
+  account=$(preflight_account)
+  cost_line "$account" "$INSTANCE_TYPE" "$REGION"
+  vpc=$(preflight_vpc)
+  placement=$(preflight_placement "$vpc" "$INSTANCE_TYPE")
+  aws_dry_run_launch "$INSTANCE_TYPE" "${placement%%"$US"*}"
+  echo "preflight ok · aws-cli $cli · zone ${placement#*"$US"} · RunInstances dry-run passed"
+  caller=$(caller_ip_or_die)
+  lab_key_ensure
+  fp=$(lab_key_fingerprint)
+  [[ -n $fp ]] || die "$EX_FAIL" "cannot read the fingerprint of $LAB_KEY.pub"
+  found=$(lab_group "$vpc")
+  group=${found%%"$US"*}
+  echo "security group $group ${found#*"$US"}"
+  sg_converge "$group" "$caller"
+  up_launch "$placement" "$group" "$fp"
+}
+
+# check_guest_fits — a type too small for the guest is a usage error at create
+check_guest_fits() {
+  guest_fits "$INSTANCE_TYPE" && return 0
+  die "$EX_USAGE" \
+    "HELIOS_LAB_INSTANCE_TYPE=$INSTANCE_TYPE is too small: the guest alone takes $GUEST_VCPUS vCPU and $GUEST_MEM_GIB GiB" \
+    'use at least 4 vCPU and 16 GiB, e.g. m8i.xlarge (the default), c8i.2xlarge or r8i.xlarge'
+}
+
+# lab_group <vpc-id> -> "group-id<US>created|reused": the lab group, found by
+# both tags and its name (an orphan from an earlier run is reused), or
+# created, tagged in the same call
+lab_group() {
+  local groups group
+  groups=$(aws_discover_groups) || return
+  case $(count_rows "$groups") in
+    0) group=$(aws_create_group "$1") || return
+       printf '%s\037created\n' "$group" ;;
+    1) printf '%s\037reused\n' "$groups" ;;
+    *) die "$EX_CONFLICT" "$(count_rows "$groups") lab security groups exist: $(row_ids "$groups")" \
+         'delete the extra one by hand; helios-lab status shows the instance' ;;
+  esac
+}
+
+# sg_converge <group-id> <caller-ipv4> — egress to exactly tcp 80/443, ingress
+# to exactly tcp/22 from the caller's /32 (R10). One describe; no further
+# call and no output when already there.
+sg_converge() {
+  local rules egress ingress
+  rules=$(aws_group_rules "$1")
+  egress=$(egress_plan "$rules")
+  ingress=$(ingress_plan "$2" "$rules")
+  aws_sg_apply "$1" egress "$egress"
+  aws_sg_apply "$1" ingress "$ingress"
+  sg_note egress 'tcp 80/443 only' "$egress"
+  sg_note 'ssh ingress' "$2/32 only" "$ingress"
+}
+
+# caller_ip_or_die -> this Mac's public IPv4: the one address ingress admits
+caller_ip_or_die() {
+  caller_ip || die "$EX_NET" "could not read this Mac's public IPv4 from $CHECKIP_URL" \
+    'the security group admits ssh from exactly that address; check the network and retry'
+}
+
+# up_launch <subnet-id<US>az> <group-id> <key-fingerprint> — the one launch.
+# A launch call in flight already arms the notice: interrupted, nobody knows
+# whether a host exists.
+up_launch() {
+  local subnet=${1%%"$US"*} az=${1#*"$US"} user_data started launched id launch
+  user_data=$(render_user_data "$(cat "$LAB_KEY.pub")") \
+    || die "$EX_FAIL" "$LAB_KEY.pub is not an ed25519 public key"
+  started=$(date +%s)
+  arm_notice '' "$INSTANCE_TYPE" ''
+  launched=$(aws_launch "$INSTANCE_TYPE" "$subnet" "$az" "$2" "$3" "$user_data")
+  IFS=$US read -r id launch <<< "$launched"
+  arm_notice "$id" "$INSTANCE_TYPE" "$(launch_epoch "$launch" "$started")"
+  echo "instance $id launched in $az · waiting for running"
+  up_running "$id" "$started"
+}
+
+# up_start <instance-id> <type> <az>
+up_start() {
+  local started
+  started=$(date +%s)
+  echo "starting $1 · billing resumes at $(hourly_cost "$2")"
+  arm_notice '' "$2" ''
+  aws_start "$1" "$2" "$3"
+  arm_notice "$1" "$2" "$started"
+  up_running "$1" "$started"
+}
+
+# up_running <instance-id> <started-epoch|""> — wait for running, then the
+# post-launch re-lookup. Invariant: at most one live tagged instance; a
+# duplicate (another Mac's concurrent up, say) exits 4 and is never resolved
+# automatically.
+up_running() {
+  aws_wait instance-running --instance-ids "$1"
+  local row id state type az ip launch rest boot
+  row=$(discover_single)
+  IFS=$US read -r id state type az ip launch rest <<< "$row"
+  [[ $id == "$1" && $state == running ]] || die "$EX_CONFLICT" \
+    "after waiting for $1 to run, discovery found: $(instance_list "$row")" 'helios-lab status shows the details'
+  boot=$(launch_epoch "$launch" "$(date +%s)")
+  arm_notice "$id" "$type" "$boot"
+  [[ -z $2 ]] || echo "instance $id running · $(fmt_elapsed $(( $(date +%s) - $2 )))"
+  running_line "$id" "$ip" "$type" "$(deadman_epoch "$boot")"
+  up_connect "$row"
+}
+
+# --- Extension point (U2/U3) ---
+# up_connect <row> — runs once the instance is running and the re-lookup has
+# passed, with the billing notice armed, so any failure here prints it. U2
+# verifies the host key against the console, pushes host/ and starts the
+# provision unit; U3 boots the guest, runs the smoke check and prints the
+# ready screen. Until then, up ends here.
+up_connect() {
+  echo 'next: helios-lab stop pauses billing · host bootstrap (U2) and the Helios guest (U3) are not built yet'
+}
+
+# --- stop --------------------------------------------------------------------
+# Stops, never terminates. Invariant: destroy --yes is the only path that
+# terminates anything.
+cmd_stop() {
+  (( $# == 0 )) || die "$EX_USAGE" 'stop takes no arguments'
+  lock_acquire
+  local row id state rest
+  row=$(discover_single)
+  IFS=$US read -r id state rest <<< "$row"
+  case $(stop_action "${state:-absent}") in
+    absent)         echo 'absent · no lab instance · nothing to stop' ;;
+    terminating)    echo "shutting-down · $id is being terminated · nothing to stop" ;;
+    already)        echo "already $(stopped_line)" ;;
+    wait)           stop_wait "$id" ;;
+    stop)           aws_stop "$id"; stop_wait "$id" ;;
+    wait-then-stop) up_wait "$id" instance-running starting; aws_stop "$id"; stop_wait "$id" ;;
+  esac
+}
+
+# stop_wait <instance-id>
+stop_wait() {
+  echo "stopping $1 · waiting for stopped"
+  aws_wait instance-stopped --instance-ids "$1"
+  stopped_line
+}
+
+# --- destroy -----------------------------------------------------------------
+# Without --yes: a read-only preview, exit 2. With --yes: the same preview,
+# from the same discovery, then exactly those deletions. Invariant: destroy
+# --yes is the only path that terminates, and it terminates only what it
+# previewed. The lab key is never touched.
+cmd_destroy() {
+  local mode rows groups volumes
+  mode=$(destroy_mode "$@")
+  [[ $mode == preview ]] || lock_acquire
+  rows=$(aws_discover_instances)
+  groups=$(aws_discover_groups)
+  volumes=$(destroy_volumes "$rows")
+  if [[ -z $rows && -z $groups ]]; then
+    echo 'nothing to destroy · no lab instance or security group'
+    return 0
+  fi
+  case $mode in
+    preview) destroy_preview 'destroy would delete:' "$rows" "$volumes" "$groups" "$LAB_KEY"
+             echo "to delete exactly this: $SELF destroy --yes"
+             exit "$EX_USAGE" ;;
+    yes)     destroy_preview 'destroying:' "$rows" "$volumes" "$groups" "$LAB_KEY"
+             destroy_apply "$rows" "$volumes" "$groups" ;;
+  esac
+}
+
+# destroy_mode <args...> -> preview | yes
+destroy_mode() {
+  case $#:${1:-} in
+    0:)      echo preview ;;
+    1:--yes) echo yes ;;
+    *)       die "$EX_USAGE" 'destroy takes no argument but --yes' "preview first: $SELF destroy" ;;
+  esac
+}
+
+# destroy_volumes <instance-rows> -> their root volumes (Q_ROOT_VOLUMES rows)
+destroy_volumes() {
+  [[ -n $1 ]] || return 0
+  local -a ids=()
+  read -r -a ids <<< "$(row_ids "$1")"
+  aws_root_volumes "${ids[@]}"
+}
+
+# destroy_apply <instance-rows> <volume-rows> <group-ids>
+destroy_apply() {
+  local -a ids=() vols=() groups=()
+  read -r -a ids <<< "$(row_ids "$1")"
+  read -r -a vols <<< "$(deleted_volumes "$2")"
+  read -r -a groups <<< "$(row_ids "$3")"
+  if (( ${#ids[@]} > 0 )); then
+    echo "terminating ${ids[*]} · waiting for terminated"
+    aws_terminate "${ids[@]}"
+    aws_wait instance-terminated --instance-ids "${ids[@]}"
+  fi
+  (( ${#vols[@]} == 0 )) || aws_wait volume-deleted --volume-ids "${vols[@]}"
+  (( ${#groups[@]} == 0 )) || destroy_groups "${groups[@]}"
+  destroy_confirm_volumes
+  echo "destroyed · no lab instance, volume or security group remains · kept: the lab key $LAB_KEY"
+}
+
+# destroy_groups <group-id>... — after the instances, whose ENIs hold them
+destroy_groups() {
+  local group
+  for group in "$@"; do
+    aws_delete_group "$group" "$SG_DELETE_ATTEMPTS" "$RETRY_SECONDS"
+    echo "security group $group deleted"
+  done
+}
+
+# destroy_confirm_volumes — no lab-tagged volume may outlive destroy: a
+# leftover would bill as storage, unseen
+destroy_confirm_volumes() {
+  local left
+  left=$(aws_discover_volumes)
+  [[ -z $left ]] || die "$EX_FAIL" "lab-tagged volumes remain: $(row_ids "$left")" \
+    'they bill as storage until deleted: delete them in the EC2 console (helios-lab never deletes a volume itself)'
+}
+
 # --- help --------------------------------------------------------------------
 cmd_help() {
   cat <<EOF
@@ -175,7 +566,8 @@ commands:
 environment:
   HELIOS_LAB_PROFILE        AWS profile (default: helios-lab)
   HELIOS_LAB_INSTANCE_TYPE  instance type, used only at create (default: m8i.xlarge)
-                            families: c8i m8i r8i (and -flex), c7i m7i r7i
+                            families: c8i m8i r8i (and -flex), c7i m7i r7i;
+                            at least 4 vCPU and 16 GiB
   HELIOS_LAB_IDLE_MINUTES   idle minutes before the host stops itself (default: 60)
 
 Region $REGION. Costs are approximate (prices as of $PRICE_DATE).
@@ -198,7 +590,9 @@ main() {
   case $cmd in
     status)          (( $# == 0 )) || die "$EX_USAGE" 'status takes no arguments'
                      cmd_status ;;
-    up|stop|destroy) not_yet U6 "$cmd" ;;
+    up)              cmd_up "$@" ;;
+    stop)            cmd_stop "$@" ;;
+    destroy)         cmd_destroy "$@" ;;
     ssh|console)     not_yet U3 "$cmd" ;;
     keep)            not_yet U4 "$cmd" ;;
     runbook)         not_yet U5 "$cmd" ;;

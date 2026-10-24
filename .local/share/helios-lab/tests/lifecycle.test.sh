@@ -343,7 +343,7 @@ test_unknown_command_and_status_arguments_are_usage_errors() {
 
 test_unimplemented_commands_exit_1_naming_their_unit() {
   local pair
-  for pair in up:U6 stop:U6 destroy:U6 ssh:U3 console:U3 keep:U4 runbook:U5; do
+  for pair in ssh:U3 console:U3 keep:U4 runbook:U5; do
     run_cli "${pair%%:*}"
     assert_rc 1
     assert_contains "$ERR" "${pair%%:*}: not implemented yet (${pair#*:})"

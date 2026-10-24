@@ -15,8 +15,11 @@ internal hostname and IAM user name is replaced with a fixed synthetic value:
 | VPC-private IPv4 | `172.31.0.10` |
 | IAM user | `helios-lab` |
 
-New captures must go through the same sanitizer and a leak check against the
-real values before they are committed. Never hand-edit a real ID into a fixture.
+New captures must go through `../sanitize-capture`, then a grep for the real
+values you know (account, instance and network IDs, your IP), before they are
+committed. It matches resource IDs generically, because a fixed prefix list
+once let a `dopt-` and a `vpc-cidr-assoc-` ID through. Never hand-edit a real ID
+into a fixture.
 
 | Fixture | What it shows |
 |---|---|
@@ -28,6 +31,7 @@ real values before they are committed. Never hand-edit a real ID into a fixture.
 | `get-console-output.latest.first-boot.txt` | `--latest` on first boot: cloud-init's block and the per-boot block |
 | `get-console-output.latest.later-boot.txt` | Later boot: per-boot block only, with systemd lines interleaved |
 | `get-console-output.buffered.first-boot.txt` | Without `--latest`: empty |
+| `user-data.spike.yaml` | The user-data the spike booted, its throwaway key replaced by an all-zero placeholder; `lib/render.sh` must render exactly this design |
 | the rest | Plain responses for describe, create, start, stop, terminate and delete calls |
 
 ## Derived replies (`derived/`)
@@ -47,9 +51,35 @@ variants (another state, another reason) by editing columns of these rows.
 |---|---|
 | `describe-instances.{running,stopped-idle,stopped-user}.discover.txt` | `Q_DISCOVER` |
 | `describe-security-group-rules.converged.ingress.txt` | `Q_INGRESS` |
+| `describe-instances.running.key-tag.txt` | `Q_KEY_TAG` (`None`: the spike's instance had no `KeyFingerprint` tag) |
+| `describe-instances.running.root-volumes.txt` | `Q_ROOT_VOLUMES` |
+| `sts-get-caller-identity.caller.txt` | `Q_CALLER` |
+| `describe-vpcs.default.vpc.txt` | `Q_VPC` |
+| `describe-instance-type-offerings.azs.txt` | `Q_OFFERED_AZS` |
+| `describe-subnets.default.subnets.txt` | `Q_SUBNETS` |
+| `create-security-group.group-id.txt` | `Q_GROUP_ID` |
+| `describe-security-group-rules.{after-create,converged}.rules.txt` | `Q_RULES` |
+| `{revoke-security-group-egress,authorize-security-group-egress,authorize-security-group-ingress,delete-security-group}.return.txt` | `Q_RETURN` |
+| `run-instances.launched.txt` | `Q_LAUNCHED` |
+| `{start,stop,terminate}-instances.state.txt` | `Q_STARTING`, `Q_STOPPING`, `Q_TERMINATING` |
 
 Text-output rules worth knowing when reading them: a null prints `None`, an
-empty string prints an empty field, each inner list prints as one tab-separated
-line, and an empty list prints nothing (so "no instances" is an empty reply).
-There is no `describe-security-groups` capture; its one-ID-per-line reply for
-`Q_GROUP_IDS` is written inline in the tests.
+empty string prints an empty field, a boolean prints `True`/`False`, each
+inner list prints as one tab-separated line, and an empty list prints nothing
+(so "no instances" is an empty reply). The sanitizer gave every captured rule
+the same `sgr-` ID, so tests that need distinct rules renumber them.
+
+### Hand-written replies
+
+Some calls have no capture, because the spike had no way to provoke them or
+they print only IDs. The tests build these inline and mark each one:
+
+- one-ID-per-line lists: `describe-security-groups` (`Q_GROUP_IDS`) and
+  `describe-volumes` (`Q_VOLUME_IDS`)
+- `revoke-security-group-ingress`, which replays the egress capture (same response shape)
+- `aws --version`, in the format of the CLI's `clidriver._cli_version`
+- errors, in the CLI v2 shape of `run-instances.dry-run-ok.stderr` (a blank
+  line, then `aws: [ERROR]: An error occurred (Code) when calling the Op
+  operation: message`): `InsufficientInstanceCapacity` on RunInstances and
+  StartInstances, `UnauthorizedOperation` on the dry-run, `DependencyViolation`
+  and `InvalidGroup.NotFound` on DeleteSecurityGroup, and a waiter timeout

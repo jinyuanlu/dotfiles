@@ -1,7 +1,9 @@
 # shellcheck shell=bash
 #
-# helios-lab state.sh — pure decisions: EC2 state -> up action, stop cause,
-# status lines, the cost table, and input validation.
+# helios-lab state.sh — pure decisions: EC2 state -> up/stop action, stop
+# cause, status lines, the cost table, input validation (U1); preflight
+# verdicts, guest sizing, security-group convergence plans, the lab-key
+# verdict and the lifecycle messages (U6).
 #
 # Pure means the output depends only on the arguments (plus TZ, for the one
 # local clock time). Nothing here calls AWS, reads files or asks for `now`:
@@ -28,6 +30,22 @@ up_action() {
     stopped)         echo start ;;
     shutting-down)   echo wait-then-create ;;
     *)               return 1 ;;
+  esac
+}
+
+# stop_action <ec2-state> -> stop | wait-then-stop | wait | already | absent | terminating
+# Total over the same states. A pending instance can't be stopped yet
+# (IncorrectInstanceState), so it is waited into running first. Invariant:
+# nothing here terminates; stop only ever stops.
+stop_action() {
+  case $1 in
+    absent)        echo absent ;;
+    pending)       echo wait-then-stop ;;
+    running)       echo stop ;;
+    stopping)      echo wait ;;
+    stopped)       echo already ;;
+    shutting-down) echo terminating ;;
+    *)             return 1 ;;
   esac
 }
 
@@ -95,6 +113,23 @@ fmt_duration() {
   fi
 }
 
+# fmt_elapsed <seconds> -> 41s | 2m05s, for stage lines
+fmt_elapsed() {
+  if (( $1 < 60 )); then printf '%ds\n' "$1"
+  else printf '%dm%02ds\n' $(( $1 / 60 )) $(( $1 % 60 ))
+  fi
+}
+
+# launch_epoch <launch-time> -> epoch, or the fallback <now> when unreadable,
+# so a notice can always name a time
+launch_epoch() { iso_epoch "$1" || echo "$2"; }
+
+# deadman_epoch <launch-epoch> -> when the user-data dead-man timer has
+# stopped the host at the latest: OnBootSec=2h counts from boot, which follows
+# the launch by seconds, so round up to the next whole minute.
+readonly DEADMAN_S=7200
+deadman_epoch() { echo $(( ($1 + DEADMAN_S + 59) / 60 * 60 )); }
+
 # --- Cost --------------------------------------------------------------------
 # Approximate on-demand prices for ap-northeast-1 from the AWS price feed on
 # PRICE_DATE. Display only, never billing truth: always shown as ≈ and dated.
@@ -129,6 +164,23 @@ running_cost() {
 storage_day_cents() {
   local e4_per_month=$(( GP3_GB_MONTH_E4 * ROOT_GB ))
   echo $(( (e4_per_month * 24 + HOURS_PER_MONTH * 50) / (HOURS_PER_MONTH * 100) ))
+}
+
+# hourly_cost <instance-type> -> ≈$0.27/hr (to the cent), or "no price for X"
+hourly_cost() {
+  local rate
+  rate=$(price_hourly_e4 "$1") || { echo "no price for $1"; return 0; }
+  echo "≈$(fmt_cents $(( (rate + 50) / 100 )))/hr"
+}
+
+# storage_month -> ≈$9.60/mo, what the root volume costs while stopped
+storage_month() { echo "≈$(fmt_cents $(( (GP3_GB_MONTH_E4 * ROOT_GB + 50) / 100 )))/mo"; }
+
+# cost_line <account> <instance-type> <region> -> the one line up prints before
+# launching anything (R14): who pays, what, where, and what it costs
+cost_line() {
+  join_dot "account $1" "$2" "$3" "$(hourly_cost "$2") running" "$(storage_month) stopped" \
+    "prices approximate, as of $PRICE_DATE"
 }
 
 # --- Stop cause --------------------------------------------------------------
@@ -303,4 +355,272 @@ ingress_allows() {
 port_in_range() {
   [[ $2 =~ ^[0-9]+$ && $3 =~ ^[0-9]+$ ]] || return 1
   (( $2 <= $1 && $1 <= $3 ))
+}
+
+# --- Guest sizing (create path) ----------------------------------------------
+# The guest takes 3 vCPU and 8 GiB (plan: "Host and guest"). The host needs
+# more of both for itself and QEMU, so a type that can't exceed them is a
+# usage error at create, before any launch call. Pure: vCPUs follow from the
+# size and memory from the family's ratio (c 2, m 4, r 8 GiB per vCPU), which
+# holds for every family instance_type_ok admits. No describe-instance-types
+# call, because the shipped policy doesn't grant it.
+readonly GUEST_VCPUS=3 GUEST_MEM_GIB=8
+
+# type_vcpus <type> -> vCPUs: large 2, xlarge 4, Nxlarge 4N
+type_vcpus() {
+  local size=${1#*.}
+  case $size in
+    large)  echo 2 ;;
+    xlarge) echo 4 ;;
+    *xlarge)
+      [[ ${size%xlarge} =~ ^[1-9][0-9]?$ ]] || return 1
+      echo $(( 4 * ${size%xlarge} )) ;;
+    *) return 1 ;;
+  esac
+}
+
+# type_mem_gib <type> -> GiB of memory
+type_mem_gib() {
+  local v
+  v=$(type_vcpus "$1") || return 1
+  case ${1:0:1} in
+    c) echo $(( v * 2 )) ;;
+    m) echo $(( v * 4 )) ;;
+    r) echo $(( v * 8 )) ;;
+    *) return 1 ;;
+  esac
+}
+
+# guest_fits <type> -> 0 when the host has more vCPUs and memory than the guest
+guest_fits() {
+  local v m
+  v=$(type_vcpus "$1") || return 1
+  m=$(type_mem_gib "$1") || return 1
+  (( v > GUEST_VCPUS && m > GUEST_MEM_GIB ))
+}
+
+# --- Preflight verdicts ------------------------------------------------------
+# cli_version_of <`aws --version` output> -> 2.38.5, from "aws-cli/2.38.5 Python/..."
+cli_version_of() {
+  [[ $1 =~ ^aws-cli/([0-9]+\.[0-9]+\.[0-9]+)([^0-9.]|$) ]] || return 1
+  echo "${BASH_REMATCH[1]}"
+}
+
+# version_at_least <have> <want> -> 0 when x.y.z <have> >= <want>, numerically
+version_at_least() {
+  local a b c x y z
+  IFS=. read -r a b c <<< "$1"
+  IFS=. read -r x y z <<< "$2"
+  (( 10#$a > 10#$x || (10#$a == 10#$x && (10#$b > 10#$y || (10#$b == 10#$y && 10#$c >= 10#$z))) ))
+}
+
+# is_root_arn <arn> -> 0 for an account's root credentials (R9 refuses them)
+is_root_arn() { [[ $1 =~ ^arn:aws[a-z-]*:iam::[0-9]{12}:root$ ]]; }
+
+# pick_subnet <offered-azs> <subnet-rows> -> "subnet-id<US>az": the default
+# subnet in the alphabetically first zone that offers the type (deterministic,
+# so retries land in the same place). Fails when no default subnet qualifies.
+# <offered-azs>: one zone per line. <subnet-rows>: US-delimited "id az" (Q_SUBNETS).
+pick_subnet() {
+  local id az best='' best_az=''
+  while IFS=$'\037' read -r id az; do
+    [[ -n $id ]] || continue
+    zone_listed "$az" "$1" || continue
+    if [[ -z $best_az || $az < $best_az ]]; then best=$id best_az=$az; fi
+  done <<< "$2"
+  [[ -n $best ]] || return 1
+  printf '%s\037%s\n' "$best" "$best_az"
+}
+
+# zone_listed <zone> <zones, one per line> -> 0 when listed exactly
+zone_listed() {
+  case $'\n'$2$'\n' in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+    *)                return 1 ;;
+  esac
+}
+
+# --- Lab key -----------------------------------------------------------------
+# fingerprint_of <`ssh-keygen -lf` line> -> SHA256:<43 base64 chars>
+fingerprint_of() {
+  local re='^[0-9]+ (SHA256:[A-Za-z0-9+/]{43}) '
+  [[ $1 =~ $re ]] || return 1
+  echo "${BASH_REMATCH[1]}"
+}
+
+# lab_key_verdict <local-fingerprint|""> <KeyFingerprint tag|None|""> -> ok | missing | mismatch
+# Invariant: the lab key is never regenerated while a tagged instance exists.
+# Neither verdict but ok lets up continue, and neither leads to a new key:
+# the guest baked the key in at create time, so only destroy recovers.
+# An untagged instance counts as a mismatch: its key can't be shown to match.
+lab_key_verdict() {
+  if [[ -z $1 ]]; then echo missing
+  elif [[ $2 == "$1" ]]; then echo ok
+  else echo mismatch
+  fi
+}
+
+# --- Security-group convergence ----------------------------------------------
+# The target (R10): egress exactly tcp 80 and 443 to 0.0.0.0/0; ingress
+# exactly tcp/22 from the caller's /32. A plan lists the calls that reach it:
+#   revoke <rule-id> <rule text>    authorize <port|cidr>
+# An empty plan means converged, so a converged group costs no calls and no
+# output. Applying a plan reaches the target, and the plan of the target is
+# empty (tests/mutations.test.sh checks both).
+# <rules>: US-delimited "rule-id is-egress proto from to cidr" rows (Q_RULES);
+# is-egress prints True/False, a missing CidrIpv4 (IPv6, group or
+# prefix-list source) prints None, and every such rule is revoked.
+readonly EGRESS_PORTS='80 443'
+
+# egress_plan <rules>
+egress_plan() {
+  local id egress proto from to cidr have=' ' port
+  while IFS=$'\037' read -r id egress proto from to cidr; do
+    [[ $egress == True ]] || continue
+    if port=$(wanted_egress_port "$proto" "$from" "$to" "$cidr"); then have="$have$port "
+    else echo "revoke $id $(rule_text "$proto" "$from" "$to" "$cidr")"
+    fi
+  done <<< "$1"
+  for port in $EGRESS_PORTS; do
+    [[ $have == *" $port "* ]] || echo "authorize $port"
+  done
+}
+
+# wanted_egress_port <proto> <from> <to> <cidr> -> the port of a target egress rule
+wanted_egress_port() {
+  if is_tcp "$1" && [[ $2 == "$3" && $4 == 0.0.0.0/0 && " $EGRESS_PORTS " == *" $2 "* ]]; then
+    echo "$2"
+  else
+    return 1
+  fi
+}
+
+# ingress_plan <caller-ipv4> <rules>
+ingress_plan() {
+  local want="$1/32" id egress proto from to cidr kept=no
+  while IFS=$'\037' read -r id egress proto from to cidr; do
+    [[ $egress == False ]] || continue
+    if [[ $kept == no ]] && is_tcp "$proto" && [[ $from == 22 && $to == 22 && $cidr == "$want" ]]; then
+      kept=yes
+    else
+      echo "revoke $id $(rule_text "$proto" "$from" "$to" "$cidr")"
+    fi
+  done <<< "$2"
+  [[ $kept == yes ]] || echo "authorize $want"
+}
+
+is_tcp() { [[ $1 == tcp || $1 == 6 ]]; }
+
+# rule_text <proto> <from> <to> <cidr> -> "tcp/22 198.51.100.7/32", "all-traffic 0.0.0.0/0"
+rule_text() {
+  local what src=$4
+  [[ $src != None ]] || src='a non-IPv4 source'
+  if [[ $1 == -1 ]]; then what=all-traffic
+  elif [[ $2 == "$3" ]]; then what="$1/$2"
+  else what="$1/$2-$3"
+  fi
+  echo "$what $src"
+}
+
+# plan_args <verb> <plan> -> the arguments of that verb's lines, space-separated
+plan_args() {
+  local verb arg rest out=''
+  while read -r verb arg rest; do
+    [[ $verb != "$1" ]] || out="${out:+$out }$arg"
+  done <<< "$2"
+  printf '%s\n' "$out"
+}
+
+# sg_note <label> <target> <plan> -> one line when the plan changes anything,
+# naming what it removes; nothing for an empty plan
+sg_note() {
+  [[ -n $3 ]] || return 0
+  local verb arg rest removed=''
+  while read -r verb arg rest; do
+    [[ $verb != revoke ]] || removed="${removed:+$removed, }$rest"
+  done <<< "$3"
+  echo "$1: $2${removed:+ (removed $removed)}"
+}
+
+# --- Lifecycle messages ------------------------------------------------------
+# type_override_note <HELIOS_LAB_INSTANCE_TYPE|""> <actual-type> <instance-id>
+# -> a warning when an explicit override can't apply. It applies only at
+# create: changing a stopped instance's type needs ModifyInstanceAttribute,
+# which the shipped policy withholds.
+type_override_note() {
+  [[ -n $1 && $1 != "$2" ]] || return 0
+  echo "HELIOS_LAB_INSTANCE_TYPE=$1 applies only at create; $3 stays $2"
+}
+
+# running_line <id> <public-ip> <type> <deadman-epoch> -> the line up ends its
+# instance stage with
+running_line() {
+  join_dot 'host running' "$1" "$2" "$(hourly_cost "$3")" \
+    "stops itself by about $(local_hhmm "$4") (dead-man timer)"
+}
+
+# stopped_line -> what stop ends with: compute billing ended, storage didn't
+stopped_line() { join_dot stopped 'disk intact' "$(storage_month) storage continues"; }
+
+# billing_notice <instance-id|""> <type> <launch-epoch> -> what a failed or
+# interrupted up prints once a host may be billing. An empty id means a launch
+# or start call was in flight, so whether a host exists is unknown.
+# Invariant (plan): from launch onward every boot has a stop armed. Until U4's
+# push enables the idle timer, that is the user-data dead-man timer; U4 names
+# the idle timer here once it exists.
+billing_notice() {
+  if [[ -z $1 ]]; then
+    printf '%s\n' 'a launch or start was in flight: helios-lab status shows whether the host is up' \
+      "  a running host bills $(hourly_cost "$2") until its dead-man timer stops it, 2h after boot"
+  else
+    printf '%s\n' "host $1 is running and billing ($(hourly_cost "$2"))" \
+      "  it stops itself by about $(local_hhmm "$(deadman_epoch "$3")") (dead-man timer, 2h after boot)"
+  fi
+  echo '  helios-lab up reattaches · helios-lab stop pauses it now'
+}
+
+# destroy_preview <heading> <instance-rows> <root-volume-rows> <group-ids> <key-path>
+# -> what destroy deletes. Invariant: destroy --yes terminates only what this
+# lists, so --yes prints it from the same discovery it then acts on.
+# <root-volume-rows>: US-delimited "volume-id delete-on-termination" (Q_ROOT_VOLUMES).
+destroy_preview() {
+  local id state type rest vol dot group
+  echo "$1"
+  while IFS=$'\037' read -r id state type rest; do
+    [[ -z $id ]] || printf '  %-9s %s (%s, %s)\n' instance "$id" "$state" "$type"
+  done <<< "$2"
+  while IFS=$'\037' read -r vol dot; do
+    [[ -z $vol ]] || printf '  %-9s %s (%s)\n' volume "$vol" "$(volume_fate "$dot")"
+  done <<< "$3"
+  while IFS= read -r group; do
+    [[ -z $group ]] || printf '  %-9s %s (security group)\n' group "$group"
+  done <<< "$4"
+  [[ -z $2 ]] || echo '  guest disk and seed will be lost; rebuild ≈10 min + 2.4 GB download'
+  echo "kept: the lab key $5"
+}
+
+# deleted_volumes <root-volume-rows> -> the IDs that go with their instance, space-separated
+deleted_volumes() {
+  local vol dot out=''
+  while IFS=$'\037' read -r vol dot; do
+    [[ -z $vol || $dot != True ]] || out="${out:+$out }$vol"
+  done <<< "$1"
+  printf '%s\n' "$out"
+}
+
+# volume_fate <DeleteOnTermination> -> what terminating its instance does to it
+volume_fate() {
+  case $1 in
+    True) echo 'root disk, deleted with its instance' ;;
+    *)    echo 'DeleteOnTermination is off: it survives; delete it in the EC2 console' ;;
+  esac
+}
+
+# row_ids <instance-rows> -> their instance IDs, space-separated
+row_ids() {
+  local id rest out=''
+  while IFS=$'\037' read -r id rest; do
+    [[ -z $id ]] || out="${out:+$out }$id"
+  done <<< "$1"
+  printf '%s\n' "$out"
 }

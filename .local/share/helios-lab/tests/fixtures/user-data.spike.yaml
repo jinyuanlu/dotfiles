@@ -1,0 +1,38 @@
+#cloud-config
+# helios-lab U7 spike: the plan's user-data design (public key, per-boot
+# host-key fingerprint printer, 2h dead-man timer). No secrets.
+ssh_authorized_keys:
+  - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA helios-lab-spike
+
+write_files:
+  - path: /etc/systemd/system/helios-lab-hostkeys.service
+    content: |
+      [Unit]
+      Description=Print SSH host key fingerprints to the console (every boot)
+      After=cloud-init.service ssh.socket
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/sh -c 'exec >/dev/console 2>&1; echo "-----BEGIN HELIOS-LAB HOST KEYS-----"; for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$f"; done; echo "-----END HELIOS-LAB HOST KEYS-----"'
+      [Install]
+      WantedBy=multi-user.target
+  - path: /etc/systemd/system/helios-lab-deadman.service
+    content: |
+      [Unit]
+      Description=helios-lab dead-man stop (no idle timer installed yet)
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/systemctl poweroff
+  - path: /etc/systemd/system/helios-lab-deadman.timer
+    content: |
+      [Unit]
+      Description=helios-lab dead-man timer: power off 2h after boot
+      [Timer]
+      OnBootSec=2h
+      Unit=helios-lab-deadman.service
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, helios-lab-deadman.timer]
+  - [systemctl, enable, --now, helios-lab-hostkeys.service]

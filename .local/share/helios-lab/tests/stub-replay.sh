@@ -14,8 +14,13 @@
 # A call with no reply at all exits 97, so an unexpected call fails loudly
 # instead of passing on empty output.
 
-# stub_record <tool> <args...> — one line per call: "<tool> <args joined by spaces>"
-stub_record() { printf '%s\n' "$*" >> "${STUB_LOG:?STUB_LOG is not set}"; }
+# stub_record <tool> <args...> — one line per call: "<tool> <args joined by
+# spaces>". A newline inside an argument (the launch's user-data) is logged
+# as a literal \n, so every call stays on exactly one line.
+stub_record() {
+  local line="$*"
+  printf '%s\n' "${line//$'\n'/\\n}" >> "${STUB_LOG:?STUB_LOG is not set}"
+}
 
 # stub_replay <scenario-dir> <name> — replays and exits with the scripted status
 stub_replay() {
