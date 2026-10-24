@@ -72,14 +72,7 @@ dependency_error() {
 }
 
 # --- Scenario builders -------------------------------------------------------
-lab_key_path() { echo "$HOME/.ssh/helios-lab_ed25519"; }
-
-# lab_key — a test lab key at the fixed path, without a passphrase
-lab_key() {
-  mkdir -p "$HOME/.ssh"
-  ssh-keygen -q -t ed25519 -N '' -C helios-lab-test -f "$(lab_key_path)"
-}
-lab_fp() { ssh-keygen -lf "$(lab_key_path).pub" | awk '{ print $2 }'; }
+# (lab_key, lab_key_path and lab_fp: tests/lib.sh)
 lab_pub() { awk '{ print $1 " " $2 }' "$(lab_key_path).pub"; }
 
 # fixture_error <name> <fixture-base> [n] — replay a captured failing call
@@ -107,6 +100,10 @@ sg_writes_ok() {
   reply ec2-authorize-security-group-ingress "$DERIVED/authorize-security-group-ingress.return.txt"
 }
 
+# What up ends with until U3 boots the guest (the U2 bootstrap is
+# remote.test.sh's subject; here world_host_ok just lets it succeed).
+readonly U2_LAST_LINE='next: helios-lab stop pauses billing · the Helios guest (U3) is not built yet'
+
 # world_absent — no lab instance and no group: a full, successful create
 world_absent() {
   lab_key
@@ -120,6 +117,7 @@ world_absent() {
   reply ec2-run-instances "$LAUNCHED"               # call 2: the launch
   reply ec2-wait < /dev/null
   caller_ip_is "$FIXTURE_IP"
+  world_host_ok
 }
 
 # world_existing <discovery-row-file> — one lab instance whose KeyFingerprint
@@ -135,6 +133,7 @@ world_existing() {
   reply ec2-stop-instances "$STOPPING"
   reply ec2-wait < /dev/null
   caller_ip_is "$FIXTURE_IP"
+  world_host_ok
 }
 
 # world_destroy <discovery-row-file|""> <group-ids> — what destroy finds
@@ -227,7 +226,8 @@ test_up_absent_creates_a_tagged_group_then_launches_the_lab_instance() {
   assert_line 6 "instance $LAB_ID launched in ap-northeast-1a · waiting for running"
   assert_contains "$(sed -n 7p <<< "$OUT")" "instance $LAB_ID running · "
   assert_line 8 "host running · $LAB_ID · $FIXTURE_IP · ≈\$0.27/hr · stops itself by about 21:51 (dead-man timer)"
-  assert_line 9 'next: helios-lab stop pauses billing · host bootstrap (U2) and the Helios guest (U3) are not built yet'
+  assert_line 9 "host key · waiting for $LAB_ID's fingerprints on its console"   # then the U2 bootstrap
+  assert_eq "$U2_LAST_LINE" "$(tail -1 <<< "$OUT")" 'last line'
   assert_no_lock
 }
 
@@ -427,7 +427,7 @@ test_up_running_converged_makes_no_write_and_no_group_line() {
   assert_no_mutation
   assert_contains "$(calls)" "aws ec2 describe-security-group-rules --filters Name=group-id,Values=$LAB_GROUP --query SecurityGroupRules[].[SecurityGroupRuleId,IsEgress,IpProtocol,FromPort,ToPort,CidrIpv4]"
   assert_line 1 "host running · $LAB_ID · $FIXTURE_IP · ≈\$0.27/hr · stops itself by about 21:51 (dead-man timer)"
-  assert_line 2 'next: helios-lab stop pauses billing · host bootstrap (U2) and the Helios guest (U3) are not built yet'
+  assert_eq "$U2_LAST_LINE" "$(tail -1 <<< "$OUT")" 'last line'
   assert_eq '' "$ERR"
 }
 

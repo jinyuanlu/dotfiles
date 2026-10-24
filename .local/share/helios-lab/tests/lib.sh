@@ -22,9 +22,9 @@ readonly COL_STATE=2 COL_LAUNCH=6 COL_REASON=9
 # don't sleep.
 new_sandbox() {
   SANDBOX=$(mktemp -d "$TEST_TMP/t.XXXXXX")
-  export STUB_AWS_DIR=$SANDBOX/aws STUB_CURL_DIR=$SANDBOX/curl STUB_LOG=$SANDBOX/calls.log
+  export STUB_AWS_DIR=$SANDBOX/aws STUB_CURL_DIR=$SANDBOX/curl STUB_SSH_DIR=$SANDBOX/ssh STUB_LOG=$SANDBOX/calls.log
   export HELIOS_LAB_STATE_DIR=$SANDBOX/state HOME=$SANDBOX/home HELIOS_LAB_RETRY_SECONDS=0
-  mkdir -p "$STUB_AWS_DIR" "$STUB_CURL_DIR" "$HOME"
+  mkdir -p "$STUB_AWS_DIR" "$STUB_CURL_DIR" "$STUB_SSH_DIR" "$HOME"
   : > "$STUB_LOG"
 }
 
@@ -143,6 +143,76 @@ set_field() { awk -F'\t' -v OFS='\t' -v col="$1" -v val="$2" '{ $col = val; prin
 iso_ago() {
   local t=$(( $(date +%s) - $1 ))
   date -u -r "$t" +%Y-%m-%dT%H:%M:%S+00:00 2>/dev/null || date -u -d "@$t" +%Y-%m-%dT%H:%M:%S+00:00
+}
+
+# --- Lab key -----------------------------------------------------------------
+# HOME is the sandbox's, so the fixed lab-key path lives in it. A test key has
+# no passphrase, so nothing ever reaches ssh-keygen's prompt.
+lab_key_path() { echo "$HOME/.ssh/helios-lab_ed25519"; }
+
+# lab_key — a test lab key at the fixed path
+lab_key() {
+  mkdir -p "$HOME/.ssh"
+  ssh-keygen -q -t ed25519 -N '' -C helios-lab-test -f "$(lab_key_path)"
+}
+lab_fp() { ssh-keygen -lf "$(lab_key_path).pub" | awk '{ print $2 }'; }
+
+# --- Host scenario builders (U2) ---------------------------------------------
+# ssh_reply <name> [file] — the stub ssh's (or ssh-keyscan's) stdout for
+# <name>, e.g. ssh-host-progress (naming rule: tests/stubs/ssh)
+ssh_reply() { if (( $# > 1 )); then cp "$2" "$STUB_SSH_DIR/$1"; else cat > "$STUB_SSH_DIR/$1"; fi; }
+
+# ssh_reply_seq <name> <n> [file] — the reply to the nth call to <name> only
+ssh_reply_seq() { ssh_reply "$1.$2" ${3:+"$3"}; }
+
+# ssh_reply_error <name> <exit> <stderr> — a failing call
+ssh_reply_error() { printf '%s\n' "$3" > "$STUB_SSH_DIR/$1.stderr"; echo "$2" > "$STUB_SSH_DIR/$1.exit"; }
+
+# ssh_stdin <name> <n> — what the nth call to <name> read on stdin
+ssh_stdin() { cat "$STUB_SSH_DIR/.stdin/$1.$2"; }
+
+# world_host_ok — a running host that verifies and provisions cleanly: the
+# console shows the first-boot blocks, the host offers the captured key
+# (they match: both are from the spike's host), the push and the unit start
+# succeed, and the first progress poll shows a finished run
+world_host_ok() {
+  reply ec2-get-console-output "$FIXTURES/get-console-output.latest.first-boot.txt"
+  ssh_reply ssh-keyscan "$FIXTURES/ssh-keyscan.ed25519.txt"
+  echo "$PUSH_EPOCH" | ssh_reply ssh-host-bash   # what helios-lab-host install prints last
+  ssh_reply ssh-host-systemctl < /dev/null
+  progress_reply 'done' | ssh_reply ssh-host-progress
+}
+
+# progress_reply <done|unchanged|packages-running|libvirt-running|guard-failed|died> [run-epoch]
+# -> a `helios-lab-host progress` reply for a run that began at run-epoch
+# (default: just after the push). Hand-written in the protocol's grammar
+# (lib/remote.sh), because the protocol is ours; remote.test.sh checks that
+# the helper itself writes exactly this grammar.
+readonly PUSH_EPOCH=1792839095 RUN_EPOCH=1792839100
+progress_reply() {
+  local t=${2:-$RUN_EPOCH}
+  case $1 in
+    done)             progress_until guard "$t"; echo "$(( t + 44 )) provision done"; echo 'unit inactive success' ;;
+    unchanged)        printf '%s\n' "$t provision start" "$t packages skip" "$t libvirt skip" "$t guard skip" \
+                        "$t provision done" 'unit inactive success' ;;
+    packages-running) printf '%s\n' "$t provision start" "$t packages start" 'unit active running' ;;
+    libvirt-running)  progress_until packages "$t"; echo "$(( t + 41 )) libvirt start"; echo 'unit active running' ;;
+    guard-failed)     progress_until libvirt "$t"; printf '%s\n' "$(( t + 44 )) guard start" \
+                        "$(( t + 46 )) guard fail loading /etc/helios-lab/guard.nft failed (nft -f): see the journal" \
+                        "$(( t + 46 )) provision fail guard" 'unit inactive success' ;;
+    died)             progress_until packages "$t"; echo "$(( t + 41 )) libvirt start"; echo 'unit failed signal' ;;
+  esac
+}
+
+# progress_until <packages|libvirt|guard> <run-epoch> — the progress lines of
+# a clean run up to and including that stage's done line
+progress_until() {
+  local t=$2
+  printf '%s\n' "$t provision start" "$t packages start" "$(( t + 41 )) packages done 8 packages installed"
+  [[ $1 != packages ]] || return 0
+  printf '%s\n' "$(( t + 41 )) libvirt start" "$(( t + 44 )) libvirt done kvm ok, default network active"
+  [[ $1 != libvirt ]] || return 0
+  printf '%s\n' "$(( t + 44 )) guard start" "$(( t + 44 )) guard done virbr0 to 169.254.0.0/16 dropped"
 }
 
 # gmt_ago <seconds> -> a manual stop's StateTransitionReason for that long ago

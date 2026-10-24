@@ -1,0 +1,15 @@
+#!/bin/bash
+# shellcheck source-path=SCRIPTDIR
+#
+# Stub `ssh-keyscan` for the helios-lab tests, so no test reaches a host.
+# Records "ssh-keyscan <args>" in STUB_LOG and replays the reply named
+# "ssh-keyscan" from STUB_SSH_DIR (the captured, sanitized
+# fixtures/ssh-keyscan.ed25519.txt in most scenarios), with the same file
+# convention as the other stubs: ssh-keyscan, .stderr, .exit, .N.
+set -euo pipefail
+
+# shellcheck source=../stub-replay.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-replay.sh"
+
+stub_record ssh-keyscan "$@"
+stub_replay "${STUB_SSH_DIR:?STUB_SSH_DIR is not set}" ssh-keyscan

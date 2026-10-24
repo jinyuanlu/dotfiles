@@ -1,0 +1,20 @@
+# helios-lab-provision.service — pushed by helios-lab up (lib/remote.sh),
+# installed by helios-lab-host install, started by up after every push.
+# Stages, markers and the progress protocol: helios-lab-host's header.
+[Unit]
+Description=helios-lab host provisioning (staged, input-keyed markers)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# Type=exec and no RemainAfterExit: `systemctl start` returns once the helper
+# is running, is a no-op while a run is active, and the unit reads active
+# exactly while stages run (the idle check, U4, relies on that).
+Type=exec
+# Empties the progress file before `systemctl start` returns, so up never
+# reads an earlier run's lines as this one's.
+ExecStartPre=/usr/local/libexec/helios-lab/helios-lab-host progress-reset
+ExecStart=/usr/local/libexec/helios-lab/helios-lab-host provision
+StandardInput=null
+
+# No [Install]: only helios-lab up starts it.

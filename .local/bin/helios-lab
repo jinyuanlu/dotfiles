@@ -13,8 +13,9 @@
 #
 # Layout: this file holds config, the lock, the lab key, the orchestration of
 # each command, and dispatch. Pure decisions live in lib/state.sh and
-# lib/render.sh, every AWS call in lib/aws.sh, all under
-# ${HELIOS_LAB_HOME:-~/.local/share/helios-lab}.
+# lib/render.sh, every AWS call in lib/aws.sh, every ssh call in
+# lib/remote.sh, all under ${HELIOS_LAB_HOME:-~/.local/share/helios-lab}.
+# host/ is pushed to the host on every up (lib/remote.sh host_push).
 #
 # Exit codes (typed, so scripts and tests can tell failures apart):
 #   0  ok
@@ -27,20 +28,24 @@
 #   4  state conflict: more than one lab instance, the lab key missing or not
 #      the instance's, another up/stop/destroy holding the lock
 #   5  capacity: EC2 has no capacity for the type, or no zone offers it
-#   6  host-key verification failure (U2)
-#   8  network: AWS or checkip unreachable
+#   6  host-key verification failure: the host offers a key its console
+#      never printed, the console shows no fingerprints in time, or a pinned
+#      host now offers another key. Never answered by trusting on first use.
+#   8  network: AWS, checkip or the host's ssh unreachable
 #
 # Env (the only knobs; region, root size and key path are constants):
 #   HELIOS_LAB_PROFILE        AWS profile (default: helios-lab)
 #   HELIOS_LAB_INSTANCE_TYPE  instance type, applied only at create (default: m8i.xlarge)
 #   HELIOS_LAB_IDLE_MINUTES   idle minutes before the host stops itself (default: 60)
 # For tests: HELIOS_LAB_HOME (library dir), HELIOS_LAB_STATE_DIR (state dir),
-# HELIOS_LAB_RETRY_SECONDS (wait between security-group delete attempts, default 10).
+# HELIOS_LAB_RETRY_SECONDS (wait between attempts of every retry and poll:
+# security-group delete, console fingerprints, host key, provision progress;
+# default 10).
 #
 set -euo pipefail
 
 readonly SELF=helios-lab
-# shellcheck disable=SC2034  # the whole table lives here; U2 raises 6
+# shellcheck disable=SC2034  # the whole table lives here
 readonly EX_OK=0 EX_FAIL=1 EX_USAGE=2 EX_AUTH=3 EX_CONFLICT=4 EX_CAPACITY=5 EX_HOSTKEY=6 EX_NET=8
 
 warn() { printf '%s: %s\n' "$SELF" "$1" >&2; }
@@ -60,14 +65,19 @@ die() {
 # Sourced from the yadm-deployed share dir. Tests point HELIOS_LAB_HOME at the
 # repo checkout, so they exercise the working tree, not an installed copy.
 readonly HELIOS_LAB_HOME="${HELIOS_LAB_HOME:-$HOME/.local/share/helios-lab}"
-[[ -r $HELIOS_LAB_HOME/lib/state.sh && -r $HELIOS_LAB_HOME/lib/aws.sh && -r $HELIOS_LAB_HOME/lib/render.sh ]] \
-  || die "$EX_FAIL" "libraries not found in $HELIOS_LAB_HOME/lib" 'run yadm pull, or set HELIOS_LAB_HOME'
+for lib in state aws render remote; do
+  [[ -r $HELIOS_LAB_HOME/lib/$lib.sh ]] \
+    || die "$EX_FAIL" "libraries not found in $HELIOS_LAB_HOME/lib" 'run yadm pull, or set HELIOS_LAB_HOME'
+done
+unset lib
 # shellcheck source=../share/helios-lab/lib/state.sh
 source "$HELIOS_LAB_HOME/lib/state.sh"
 # shellcheck source=../share/helios-lab/lib/aws.sh
 source "$HELIOS_LAB_HOME/lib/aws.sh"
 # shellcheck source=../share/helios-lab/lib/render.sh
 source "$HELIOS_LAB_HOME/lib/render.sh"
+# shellcheck source=../share/helios-lab/lib/remote.sh
+source "$HELIOS_LAB_HOME/lib/remote.sh"
 
 # --- Configuration -----------------------------------------------------------
 readonly PROFILE="${HELIOS_LAB_PROFILE:-helios-lab}"
@@ -77,6 +87,12 @@ readonly STATE_DIR="${HELIOS_LAB_STATE_DIR:-$HOME/.local/state/helios-lab}"
 # The lab key lives at one fixed path (plan: "Where state lives"), so every
 # command and every Mac agrees on it. destroy never touches it.
 readonly LAB_KEY="$HOME/.ssh/helios-lab_ed25519"
+# Rendered on every connecting command (lib/render.sh), and the host keys
+# pinned from the console: both private to this Mac, both in the state dir.
+readonly SSH_CONFIG="$STATE_DIR/ssh_config" KNOWN_HOSTS="$STATE_DIR/known_hosts"
+# The helios-engvm commit the guest is built from (R6), as the U7 spike ran
+# it; pushed in the host config, where U3's engvm stage checks it out.
+readonly ENGVM_PIN=8ef18ef53d3baa03eebe5f2238a3a4ceef1b6f4a
 # destroy retries the group delete for 12 x 10 s: a terminated instance's ENI
 # can hold the group for a minute or two.
 readonly SG_DELETE_ATTEMPTS=12
@@ -106,7 +122,7 @@ readonly LOCK_FILE="$STATE_DIR/lock"
 # even if a signal lands right after it is taken
 lock_acquire() {
   [[ -x $SHLOCK ]] || die "$EX_FAIL" "$SHLOCK not found: helios-lab locks with macOS's shlock"
-  [[ -d $STATE_DIR ]] || { mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"; }
+  state_dir_ensure
   trap on_exit EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -114,6 +130,12 @@ lock_acquire() {
   "$SHLOCK" -p "$$" -f "$LOCK_FILE" || die "$EX_CONFLICT" \
     "another helios-lab up, stop or destroy is running (pid $(cat "$LOCK_FILE" 2>/dev/null || echo unknown))" \
     'wait for it to finish; once that process is gone, the next run takes the lock over'
+}
+
+# state_dir_ensure — the state dir holds the lock, the ssh fragment and the
+# pinned host keys: readable by this user only
+state_dir_ensure() {
+  [[ -d $STATE_DIR ]] || { mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"; }
 }
 
 # lock_release — only our own lock, never another process's
@@ -283,9 +305,12 @@ ip_anomaly() {
 
 # --- up ----------------------------------------------------------------------
 # Converges from any EC2 state to "host running" by the state machine in
-# state.sh (up_action), then hands over to the U2/U3 extension point.
+# state.sh (up_action), then bootstraps the host (up_connect). -v adds the
+# host's provisioning journal; UP_VERBOSE is set once, here, and only read.
 cmd_up() {
-  (( $# == 0 )) || die "$EX_USAGE" 'up takes no arguments'
+  local mode
+  mode=$(up_mode "$@")
+  readonly UP_VERBOSE=$mode
   lock_acquire
   local row id state type az ip launch rest
   row=$(discover_single)
@@ -301,6 +326,15 @@ cmd_up() {
   esac
 }
 
+# up_mode <args...> -> quiet | verbose
+up_mode() {
+  case $#:${1:-} in
+    0:)   echo quiet ;;
+    1:-v) echo verbose ;;
+    *)    die "$EX_USAGE" 'up takes no argument but -v' "try: $SELF help" ;;
+  esac
+}
+
 # up_wait <instance-id> <waiter> <doing> — wait out a transition before acting
 up_wait() {
   echo "waiting for $1 to finish $3"
@@ -311,14 +345,23 @@ up_wait() {
 # must be the lab key, the type override can't apply, and the group admits
 # exactly this Mac (the ingress refresh every connecting command runs)
 up_existing() {
-  local id state type az ip launch group rest note caller
+  local id state type az ip launch group rest note
   IFS=$US read -r id state type az ip launch group rest <<< "$1"
   lab_key_check "$id"
   note=$(type_override_note "${HELIOS_LAB_INSTANCE_TYPE:-}" "$type" "$id")
   [[ -z $note ]] || warn "$note"
   [[ -n $group && $group != None ]] || die "$EX_FAIL" "$id has no security group" 'helios-lab status shows the details'
+  ingress_refresh "$group"
+}
+
+# ingress_refresh <group-id> — the first step of every connecting command
+# (R10): ingress becomes exactly this Mac's /32 on tcp/22 (one line when that
+# changes), egress exactly tcp 80/443. up runs it before any start; U3's ssh
+# and console run it, then host_reach (lib/remote.sh).
+ingress_refresh() {
+  local caller
   caller=$(caller_ip_or_die)
-  sg_converge "$group" "$caller"
+  sg_converge "$1" "$caller"
 }
 
 # up_create — absent: preflight (the cost line before the dry-run), the lab
@@ -432,14 +475,29 @@ up_running() {
   up_connect "$row"
 }
 
-# --- Extension point (U2/U3) ---
-# up_connect <row> — runs once the instance is running and the re-lookup has
-# passed, with the billing notice armed, so any failure here prints it. U2
-# verifies the host key against the console, pushes host/ and starts the
-# provision unit; U3 boots the guest, runs the smoke check and prints the
-# ready screen. Until then, up ends here.
+# up_connect <row> — the host bootstrap (U2). Runs once the instance is
+# running and the re-lookup has passed, with the billing notice armed, so
+# any failure here prints it. The host key is verified against the console
+# on first contact, the fragment is rendered for this IP, host/ and its
+# config are pushed (every up: R13), and the provision unit is started and
+# followed stage by stage. Invariant: from launch onward every boot has a
+# stop armed; until U4, nothing here touches the dead-man timer.
 up_connect() {
-  echo 'next: helios-lab stop pauses billing · host bootstrap (U2) and the Helios guest (U3) are not built yet'
+  local id state type az ip rest pushed
+  IFS=$US read -r id state type az ip rest <<< "$1"
+  host_reach "$id" "$ip"
+  pushed=$(host_push)
+  push_line
+  provision_start
+  provision_follow "$pushed"
+  [[ ${UP_VERBOSE:-quiet} != verbose ]] || provision_journal_print
+  echo 'host ready · KVM, libvirt and the metadata guard are in place'
+  # --- Extension point (U3/U4) ---
+  # U3: the provision run gains the engvm, seed and guest stages (followed
+  # above, the seed line with the RFD 26 link); then the smoke check through
+  # the guest alias and the ready screen replace the next line. U4: the push
+  # enables the idle timer, then disarms the dead-man timer.
+  echo 'next: helios-lab stop pauses billing · the Helios guest (U3) is not built yet'
 }
 
 # --- stop --------------------------------------------------------------------
@@ -553,8 +611,9 @@ $SELF: an x86 Helios (illumos) VM on AWS, for DTrace and MDB.
 usage: $SELF <command>
 
 commands:
-  up                      create or start the host, boot the guest, check DTrace
-  stop                    stop the host; its disk and the guest are kept
+  up [-v]                 create or start the host, boot the guest, check DTrace
+                          (-v also prints the host's provisioning journal)
+  stop                  stop the host; its disk and the guest are kept
   status                  state, cost so far and auto-stop time; anomalies first
   ssh [guest|host] [cmd]  ssh into the guest (default) or the host
   console                 attach to the guest's serial console

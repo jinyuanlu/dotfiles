@@ -1,0 +1,14 @@
+#!/bin/bash
+# shellcheck source-path=SCRIPTDIR
+#
+# Tripwire `scp` for the helios-lab tests. helios-lab never copies with scp
+# (the push travels as ssh stdin, lib/remote.sh), so any call is a bug: it is
+# recorded and fails loudly, and never reaches the real client or a host.
+set -euo pipefail
+
+# shellcheck source=../stub-replay.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-replay.sh"
+
+stub_record scp "$@"
+printf 'stub scp: helios-lab does not use scp: scp %s\n' "$*" >&2
+exit 99

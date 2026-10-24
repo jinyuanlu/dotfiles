@@ -31,6 +31,7 @@ into a fixture.
 | `get-console-output.latest.first-boot.txt` | `--latest` on first boot: cloud-init's block and the per-boot block |
 | `get-console-output.latest.later-boot.txt` | Later boot: per-boot block only, with systemd lines interleaved |
 | `get-console-output.buffered.first-boot.txt` | Without `--latest`: empty |
+| `ssh-keyscan.ed25519.txt` | `ssh-keyscan -t ed25519` of the same host: its key's fingerprint is the `(ED25519)` line in all three console blocks, so a test's "offered key matches the console" is a real match |
 | `user-data.spike.yaml` | The user-data the spike booted, its throwaway key replaced by an all-zero placeholder; `lib/render.sh` must render exactly this design |
 | the rest | Plain responses for describe, create, start, stop, terminate and delete calls |
 
@@ -63,6 +64,14 @@ variants (another state, another reason) by editing columns of these rows.
 | `run-instances.launched.txt` | `Q_LAUNCHED` |
 | `{start,stop,terminate}-instances.state.txt` | `Q_STARTING`, `Q_STOPPING`, `Q_TERMINATING` |
 
+The console captures need no derivation: the spike ran `get-console-output
+--query Output --output text` itself (`Q_CONSOLE`), so they already are the
+reply bytes, trimmed to the fingerprint blocks (the full boot log is ~64 KB).
+The later-boot one keeps its CRLF line ends and the systemd lines inside the
+block; the parser must cope with both. The keyscan capture went through
+`../sanitize-capture` like the rest (its address is the synthetic one, the
+public host key of the terminated spike host is kept).
+
 Text-output rules worth knowing when reading them: a null prints `None`, an
 empty string prints an empty field, a boolean prints `True`/`False`, each
 inner list prints as one tab-separated line, and an empty list prints nothing
@@ -83,3 +92,9 @@ they print only IDs. The tests build these inline and mark each one:
   operation: message`): `InsufficientInstanceCapacity` on RunInstances and
   StartInstances, `UnauthorizedOperation` on the dry-run, `DependencyViolation`
   and `InvalidGroup.NotFound` on DeleteSecurityGroup, and a waiter timeout
+- the host's side of ssh (U2): `helios-lab-host progress` replies
+  (`../lib.sh` `progress_reply`), written in the progress protocol that
+  `lib/remote.sh` and `host/helios-lab-host` document. The protocol is ours,
+  so there is nothing to capture; instead `remote.test.sh` runs the helper's
+  own provisioning (stages faked) and checks its output is exactly this shape.
+  Journal lines, and ssh's own error messages, are hand-written too.

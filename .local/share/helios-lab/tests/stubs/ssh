@@ -1,0 +1,53 @@
+#!/bin/bash
+# shellcheck source-path=SCRIPTDIR
+#
+# Stub `ssh` for the helios-lab tests. It is never the real client: tests/run
+# puts tests/stubs first on PATH and refuses to start unless `ssh` resolves
+# here, so no test ever connects anywhere.
+#
+# Call contract (lib/remote.sh; exit 98 otherwise):
+#   ssh -F <existing file> <host|guest> <one remote command>
+# -F first, and the fragment must already exist: no call can bypass it, and
+# none can pass by running before the fragment was written.
+#
+# Reply name: ssh-<alias>-<program>. <program> is the remote command's first
+# word after an optional `sudo`, without its directory; for the host helper,
+# its subcommand instead:
+#   sudo bash -c '...'                                      ssh-host-bash (the push)
+#   sudo systemctl start helios-lab-provision.service       ssh-host-systemctl
+#   /usr/local/libexec/helios-lab/helios-lab-host progress  ssh-host-progress
+#   sudo /usr/local/.../helios-lab-host journal 20          ssh-host-journal
+# Files, sequences (<name>.N) and the exit-97 "no reply" rule:
+# tests/stub-replay.sh. Each call's stdin is saved as <dir>/.stdin/<name>.<N>
+# (the push's bundle), so tests can unpack exactly what the host would get.
+#
+# Env: STUB_SSH_DIR (the scenario's replies), STUB_LOG (one line per call:
+# "ssh <args>").
+set -euo pipefail
+
+# shellcheck source=../stub-replay.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../stub-replay.sh"
+
+contract_fail() { printf 'stub ssh: %s: ssh %s\n' "$1" "${*:2}" >&2; exit 98; }
+
+# reply_name <alias> <remote command>
+reply_name() {
+  local word sub rest
+  read -r word sub rest <<< "$2"
+  [[ $word != sudo ]] || read -r word sub rest <<< "$sub $rest"
+  word=${word##*/}
+  [[ $word != helios-lab-host ]] || word=$sub
+  echo "ssh-$1-$word"
+}
+
+stub_record ssh "$@"
+(( $# == 4 )) || contract_fail 'expected: -F <file> <host|guest> <command>' "$@"
+[[ $1 == -F && -f $2 ]] || contract_fail '-F <existing fragment> must come first' "$@"
+[[ $3 == host || $3 == guest ]] || contract_fail 'the alias must be host or guest' "$@"
+
+dir=${STUB_SSH_DIR:?STUB_SSH_DIR is not set}
+name=$(reply_name "$3" "$4")
+n=$(( $(cat "$dir/.calls/$name" 2>/dev/null || echo 0) + 1 ))   # the number stub_replay gives this call
+mkdir -p "$dir/.stdin"
+cat > "$dir/.stdin/$name.$n"
+stub_replay "$dir" "$name"

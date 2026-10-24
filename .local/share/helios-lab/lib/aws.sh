@@ -2,7 +2,8 @@
 #
 # helios-lab aws.sh — the only module that talks to AWS (and to checkip).
 # U1: read-only discovery. U6: preflight, the security group, launch, start,
-# stop, terminate and the waits. Decisions stay pure in state.sh and
+# stop, terminate and the waits. U2: the console read that host-key
+# verification compares against (remote.sh). Decisions stay pure in state.sh and
 # render.sh; this file only turns them into calls.
 #
 # Call contract (tests/stubs/aws enforces it, exit 98 otherwise):
@@ -63,6 +64,9 @@ readonly Q_LAUNCHED='Instances[0].[InstanceId,LaunchTime]'
 readonly Q_STARTING='StartingInstances[].[InstanceId,CurrentState.Name]'
 readonly Q_STOPPING='StoppingInstances[].[InstanceId,CurrentState.Name]'
 readonly Q_TERMINATING='TerminatingInstances[].[InstanceId,CurrentState.Name]'
+# U2. The CLI decodes the console's base64 itself; the spike captured exactly
+# this query's text output (fixtures/get-console-output.*), so no derivation.
+readonly Q_CONSOLE='Output'
 
 # Text output separates fields with tabs, and tab is IFS whitespace: `read`
 # would merge an empty field (StateTransitionReason is "" while running) into
@@ -215,6 +219,12 @@ aws_root_volumes() { aws_query ec2 describe-instances "$Q_ROOT_VOLUMES" --instan
 
 # aws_discover_volumes -> one lab-tagged volume ID per line, in any state
 aws_discover_volumes() { aws_query ec2 describe-volumes "$Q_VOLUME_IDS" --filters "$F_PROJECT" "$F_MANAGED"; }
+
+# aws_console_output <instance-id> -> the serial console's recent text (U2).
+# Always --latest: without it EC2 returns a buffered snapshot that was still
+# empty on first boot in the spike, while --latest (Nitro) showed both
+# fingerprint blocks. aws_call, not aws_query: console text keeps its tabs.
+aws_console_output() { aws_call ec2 get-console-output --instance-id "$1" --latest --query "$Q_CONSOLE"; }
 
 # --- Preflight (create path only) --------------------------------------------
 # aws_cli_version -> what `aws --version` prints (outside the call contract:

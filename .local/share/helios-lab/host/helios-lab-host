@@ -1,0 +1,527 @@
+#!/bin/bash
+#
+# helios-lab-host — the host side of helios-lab. On every `helios-lab up` the
+# Mac pushes this file, the units beside it and a rendered host.conf
+# (lib/remote.sh host_push), runs `install` on them, then starts
+# helios-lab-provision.service, whose ExecStart is `provision`.
+#
+# Installed layout (`install` places what the push carries):
+#   /usr/local/libexec/helios-lab/helios-lab-host   this helper, 0755
+#   /etc/systemd/system/helios-lab-*.service        units from host/, 0644
+#   /etc/helios-lab/host.conf                       the Mac's settings, 0644
+# Written by provisioning:
+#   /var/lib/helios-lab/stage.<stage>   marker: the input the stage was built from
+#   /var/lib/helios-lab/progress        the current run's progress (protocol below)
+#   /etc/helios-lab/guard.nft and /etc/systemd/system/helios-lab-guard.service
+#                                       the metadata guard and its boot-time loader
+#
+# Subcommands:
+#   install <dir>    place the pushed files, reload systemd, print the epoch (root; the push)
+#   provision        run the stages under a lock (root; the unit's ExecStart)
+#   progress-reset   empty the progress file (root; the unit's ExecStartPre)
+#   progress         print the progress file and the unit's state (the Mac polls)
+#   journal [n|all]  the current run's journal lines (root; the Mac, on failure or -v)
+# Start provisioning only through the unit (systemctl start
+# helios-lab-provision): it empties the progress file first, and a second run
+# can't start while one is active. The lock covers a run started by hand.
+#
+# Stages, in order: packages, libvirt, guard (U3 appends engvm, seed, guest).
+# A stage that succeeds records its INPUT in its marker: a hash of everything
+# it applies (stage_spec). The next run skips the stage only when the
+# recorded input equals the pushed one (stage_decision) and its live check
+# still passes (a reboot can lose what a stage set up). So a changed helper
+# or setting re-applies (R13), a failed or interrupted stage runs again, and
+# re-running provision on a completed host skips every stage.
+#
+# Progress protocol (lib/remote.sh parses it; keep both in step). One line
+# per event, appended to the progress file and printed to the journal:
+#   <epoch> <name> <event> [<message>]
+#   name:    provision (the run itself) or a stage, [a-z][a-z0-9-]*
+#   event:   start | done | skip | fail
+#   message: one line; for fail, the reason; for done, an optional summary
+# A run begins with "provision start" and ends with "provision done" or
+# "provision fail <stage>". `progress` prints the file, then one last line:
+#   unit <ActiveState> <Result>
+#
+# Bash: this runs as /bin/bash on Ubuntu 24.04, but the Mac suite sources it
+# under macOS /bin/bash 3.2 to test its pure functions, so the whole file
+# stays 3.2-safe, and main runs only when the file is executed.
+
+readonly HOST_SELF=helios-lab-host
+# Tests only: a sandbox prefix for every path this helper writes. Empty on
+# the host (systemd and sudo both start it with a clean environment).
+readonly ROOT_PREFIX=${HELIOS_LAB_HOST_ROOT:-}
+readonly LIBEXEC_DIR=$ROOT_PREFIX/usr/local/libexec/helios-lab
+readonly SYSTEMD_DIR=$ROOT_PREFIX/etc/systemd/system
+readonly CONF_DIR=$ROOT_PREFIX/etc/helios-lab
+readonly CONF_FILE=$CONF_DIR/host.conf
+readonly MARKER_DIR=$ROOT_PREFIX/var/lib/helios-lab
+readonly PROGRESS_FILE=$MARKER_DIR/progress
+readonly PROVISION_LOCK=$ROOT_PREFIX/run/lock/helios-lab-provision.lock
+readonly SERVICE=helios-lab-provision.service
+readonly GUARD_SERVICE=helios-lab-guard.service
+readonly GUARD_RULES=/etc/helios-lab/guard.nft   # as the guard unit names it
+
+readonly STAGES='packages libvirt guard'
+readonly LAB_USER=ubuntu
+readonly LIBVIRT_URI=qemu:///system
+# helios-engvm needs Ubuntu's QEMU (its domain XML names pc-i440fx-focal);
+# libnss-libvirt resolves `helios` for the Mac's ProxyJump; cpu-checker gives
+# kvm-ok; cpio is engvm's; nftables loads the guard.
+readonly PACKAGES='qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients libnss-libvirt cpu-checker cpio nftables'
+
+die() { printf '%s: %s\n' "$HOST_SELF" "$1" >&2; exit 1; }
+
+# =============================================================================
+# Pure functions (the Mac suite calls these directly)
+# =============================================================================
+
+# stage_decision <recorded input|""> <pushed input> -> run | skip
+# A stage is skipped only when its marker records exactly the input the
+# push brings; an absent marker, a different input, or (defensively) an
+# empty pushed input all run it.
+stage_decision() {
+  if [[ -n $2 && $1 == "$2" ]]; then echo skip; else echo run; fi
+}
+
+# stage_spec <stage> -> the text a stage's input hashes: everything it
+# applies. The "rN" revision is bumped when a stage's code changes in a way
+# its spec doesn't show, so hosts re-run it.
+stage_spec() {
+  case $1 in
+    packages) printf 'packages r1: %s\n' "$PACKAGES" ;;
+    libvirt)  printf 'libvirt r1: %s in libvirt,kvm; %s; network default active+autostart; nss libvirt_guest\n' \
+                "$LAB_USER" "$LIBVIRT_URI"
+              libvirt_guests_conf ;;
+    guard)    echo 'guard r1'; guard_ruleset; guard_unit ;;
+    *)        return 1 ;;
+  esac
+}
+
+# spec_input <spec text> -> "sha256:<hex>", the value a marker records
+spec_input() {
+  local sum
+  sum=$(printf '%s\n' "$1" | sha256_hex) || return 1
+  [[ $sum =~ ^[0-9a-f]{64}$ ]] || return 1
+  echo "sha256:$sum"
+}
+
+# sha256_hex — stdin's SHA-256 in hex (sha256sum on Ubuntu, shasum on a Mac)
+sha256_hex() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1
+  else shasum -a 256 | cut -d' ' -f1
+  fi
+}
+
+# stage_input <stage> -> the input the pushed code and config give that stage
+stage_input() {
+  local spec
+  spec=$(stage_spec "$1") || return 1
+  spec_input "$spec"
+}
+
+# progress_line <epoch> <name> <event> [message] -> one protocol line. The
+# message is flattened to one line (control characters become spaces).
+# Fails on a name or event outside the protocol: that is a bug, not data.
+progress_line() {
+  local msg=${4:-}
+  [[ $1 =~ ^[0-9]+$ && $2 =~ ^[a-z][a-z0-9-]*$ ]] || return 1
+  case $3 in start|done|skip|fail) ;; *) return 1 ;; esac
+  msg=${msg//[[:cntrl:]]/ }
+  printf '%s %s %s%s\n' "$1" "$2" "$3" "${msg:+ $msg}"
+}
+
+# install_dest <pushed file name> -> "<path> <mode>"; fails for a name with
+# no rule, so a new host/ file can't land somewhere by accident (U3 and U4
+# add rules for theirs)
+install_dest() {
+  case $1 in
+    helios-lab-host)                         echo "$LIBEXEC_DIR/$1 0755" ;;
+    helios-lab-*.service|helios-lab-*.timer) echo "$SYSTEMD_DIR/$1 0644" ;;
+    host.conf)                               echo "$CONF_DIR/$1 0644" ;;
+    *)                                       return 1 ;;
+  esac
+}
+
+# conf_get <host.conf text> <key> -> its value; fails when absent
+conf_get() {
+  local line
+  while IFS= read -r line; do
+    [[ $line != "$2="* ]] || { printf '%s\n' "${line#*=}"; return 0; }
+  done <<< "$1"
+  return 1
+}
+
+# conf_problem <host.conf text> -> what is wrong with it, or nothing. The Mac
+# renders it (render_host_config); this guards against a stale or edited file.
+conf_problem() {
+  local line idle pin
+  while IFS= read -r line; do
+    case $line in
+      ''|'#'*|IDLE_MINUTES=*|ENGVM_PIN=*) ;;
+      *) echo "unexpected line: $line"; return 0 ;;
+    esac
+  done <<< "$1"
+  idle=$(conf_get "$1" IDLE_MINUTES) || { echo 'IDLE_MINUTES is missing'; return 0; }
+  pin=$(conf_get "$1" ENGVM_PIN) || { echo 'ENGVM_PIN is missing'; return 0; }
+  idle_ok "$idle" || { echo "IDLE_MINUTES=$idle is not 5..720 in steps of 5"; return 0; }
+  [[ $pin =~ ^[0-9a-f]{40}$ ]] || echo "ENGVM_PIN=$pin is not a full commit hash"
+}
+
+idle_ok() { [[ $1 =~ ^[1-9][0-9]{0,2}$ ]] && (( $1 % 5 == 0 && $1 <= 720 )); }
+
+# with_libvirt_guest <nsswitch.conf text> -> the same, with libvirt_guest on
+# the hosts line (right after "files"), so the host resolves the guest's
+# name `helios` from libvirt's leases. Unchanged when it is already there.
+with_libvirt_guest() {
+  local line re='^(hosts:[[:space:]]+files)([[:space:]].*)?$'
+  while IFS= read -r line; do
+    case $line in
+      hosts:*libvirt_guest*) ;;
+      hosts:*) if [[ $line =~ $re ]]; then line="${BASH_REMATCH[1]} libvirt_guest${BASH_REMATCH[2]}"
+               else line="hosts: libvirt_guest ${line#hosts:}"
+               fi ;;
+    esac
+    printf '%s\n' "$line"
+  done <<< "$1"
+}
+
+# environment_with_uri <environment text> -> the same, with exactly one
+# LIBVIRT_DEFAULT_URI line, the system one: engvm's create.sh runs as ubuntu
+# and must reach qemu:///system, where the default network lives
+environment_with_uri() {
+  local line
+  if [[ -n $1 ]]; then
+    while IFS= read -r line; do
+      [[ $line == LIBVIRT_DEFAULT_URI=* ]] || printf '%s\n' "$line"
+    done <<< "$1"
+  fi
+  printf 'LIBVIRT_DEFAULT_URI=%s\n' "$LIBVIRT_URI"
+}
+
+# libvirt_guests_conf -> /etc/default/libvirt-guests: on host poweroff (stop,
+# or the idle timer) shut the guest down gracefully, which Helios does on ACPI
+# in about 20 s (U7); never start guests from here
+libvirt_guests_conf() {
+  printf '%s\n' '# helios-lab (helios-lab-host, libvirt stage): shut guests down gracefully' \
+    '# on host poweroff; never start them from here.' 'ON_BOOT=ignore' 'ON_SHUTDOWN=shutdown' 'SHUTDOWN_TIMEOUT=120'
+}
+
+# guard_ruleset -> /etc/helios-lab/guard.nft: forwarded traffic from the
+# libvirt bridge to 169.254.0.0/16 is dropped, so the guest can't reach IMDS
+# even if the hop limit ever regresses (R10). One transaction: create the
+# table if missing, delete it, recreate it whole. Loading it again is
+# therefore idempotent, and a half-applied earlier load can't leave a table
+# without its chain. The chain is not named "fwd": that is an nft keyword.
+# Validated on the U7 host. iifname matches by name, so it loads before
+# virbr0 exists.
+guard_ruleset() {
+  cat <<'EOF'
+# helios-lab guard (helios-lab-host, guard stage): drop guest traffic to the
+# link-local range, which holds the instance metadata service.
+table inet helios_lab_guard
+delete table inet helios_lab_guard
+table inet helios_lab_guard {
+  chain forward_guard {
+    type filter hook forward priority -10; policy accept;
+    iifname "virbr0" ip daddr 169.254.0.0/16 drop
+  }
+}
+EOF
+}
+
+# guard_unit -> helios-lab-guard.service: loads the ruleset on every boot,
+# early (the pattern of Debian's nftables.service). libvirtd REQUIRES it and
+# starts after it, so no guest ever runs without it: if the load fails,
+# libvirtd fails too (fail closed), until the next up re-runs the guard stage.
+# No ExecStop: the rules stay until poweroff. Debian's own nftables.service
+# is not used: its config starts with "flush ruleset".
+guard_unit() {
+  printf '%s\n' '[Unit]' \
+    'Description=helios-lab guard: drop guest traffic from virbr0 to 169.254.0.0/16' \
+    'DefaultDependencies=no' 'Wants=network-pre.target' 'Before=network-pre.target libvirtd.service' '' \
+    '[Service]' 'Type=oneshot' 'RemainAfterExit=yes' "ExecStart=/usr/sbin/nft -f $GUARD_RULES" '' \
+    '[Install]' 'WantedBy=sysinit.target' 'RequiredBy=libvirtd.service'
+}
+
+# =============================================================================
+# Effects
+# =============================================================================
+
+# progress <name> <event> [message] — one protocol line, to the progress
+# file and to stdout (the unit's journal)
+progress() {
+  local line
+  line=$(progress_line "$(date +%s)" "$@") || die "bad progress event: $*"
+  mkdir -p "$MARKER_DIR"
+  printf '%s\n' "$line" >> "$PROGRESS_FILE"
+  printf '%s\n' "$line"
+}
+
+marker_read() { cat "$MARKER_DIR/stage.$1" 2>/dev/null || true; }
+
+# marker_write <stage> <input> — only after the stage succeeded; atomic
+marker_write() {
+  mkdir -p "$MARKER_DIR"
+  printf '%s\n' "$2" > "$MARKER_DIR/stage.$1.new"
+  mv -f "$MARKER_DIR/stage.$1.new" "$MARKER_DIR/stage.$1"
+}
+
+# write_file <path> <content> <mode> — replaced atomically (rename), so a
+# reader, or a bash still running the old file, never sees half of it
+write_file() {
+  mkdir -p "${1%/*}" && printf '%s\n' "$2" > "$1.new" && chmod "$3" "$1.new" && mv -f "$1.new" "$1"
+}
+
+# stage_fail <reason> — inside a stage: the reason goes to fd 3, which
+# run_stage reads, and the stage's subshell exits
+stage_fail() { printf '%s\n' "$1" >&3; exit 1; }
+
+# run_stage <stage> — skip it or apply it, per its marker. A marker is
+# trusted only while the stage's live check passes.
+run_stage() {
+  local input recorded
+  input=$(stage_input "$1") || return 1
+  recorded=$(marker_read "$1")
+  if [[ -n $recorded ]] && ! "check_$1"; then recorded=''; fi
+  case $(stage_decision "$recorded" "$input") in
+    skip) progress "$1" skip ;;
+    run)  apply_stage "$1" "$input" ;;
+  esac
+}
+
+# apply_stage <stage> <input> — runs stage_<stage> in a subshell. Its stdout
+# and stderr go to the journal; the last line it writes to fd 3 is its
+# summary (done) or reason (fail). The marker is written only on success.
+apply_stage() {
+  local summary rc=0
+  progress "$1" start
+  { summary=$("stage_$1" 3>&1 1>&4) || rc=$?; } 4>&1
+  summary=${summary##*$'\n'}
+  if (( rc != 0 )); then
+    progress "$1" fail "${summary:-exited $rc; see the journal}"
+    return 1
+  fi
+  marker_write "$1" "$2"
+  progress "$1" 'done' "$summary"
+}
+
+# provision_run — the stages, in order, framed by "provision start" and
+# "provision done"; the first failing stage ends the run
+provision_run() {
+  local conf why stage
+  progress provision start
+  conf=$(cat "$CONF_FILE" 2>/dev/null) || conf=''
+  if [[ -z $conf ]]; then why='missing or empty'; else why=$(conf_problem "$conf"); fi
+  if [[ -n $why ]]; then
+    progress provision fail "bad host config $CONF_FILE: $why; run helios-lab up"
+    return 1
+  fi
+  for stage in $STAGES; do
+    run_stage "$stage" || { progress provision fail "$stage"; return 1; }
+  done
+  # --- Extension point (U3) ---
+  # engvm, seed and guest join STAGES; their inputs come from $conf (ENGVM_PIN).
+  progress provision 'done'
+}
+
+# cmd_provision — the unit's ExecStart. The lock keeps a run started by hand
+# from overlapping the unit's.
+cmd_provision() {
+  require_root provision
+  mkdir -p "${PROVISION_LOCK%/*}"
+  exec 9>"$PROVISION_LOCK"
+  flock -n 9 || die 'another provision run holds the lock; start provisioning only through the unit'
+  provision_run
+}
+
+# --- Stages ------------------------------------------------------------------
+# Each runs in a subshell without errexit, so every step states its own
+# failure with stage_fail. What a stage writes to fd 3 last is its summary.
+
+# apt_get — no prompt can be answered here (StandardInput=null): a conffile
+# this helper edited (/etc/default/libvirt-guests) keeps the local version
+# when an upgrade ships a new one, instead of asking
+apt_get() {
+  apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -q "$@"
+}
+
+# with_lock_retries <command...> — DPkg::Lock::Timeout covers only dpkg's
+# frontend lock; dpkg itself and `apt-get update`'s lists lock fail at once
+# while another apt holds them (apt-daily, on a first boot). So retry: up to
+# 30 tries, 10 s apart.
+readonly LOCK_TRIES=30
+with_lock_retries() {
+  local n
+  for (( n = 1; n <= LOCK_TRIES; n++ )); do
+    "$@" && return 0
+    (( n == LOCK_TRIES )) || sleep 10
+  done
+  return 1
+}
+
+stage_packages() {
+  # needrestart only asks about services on upgraded libraries, and this
+  # installs new packages: it sits out
+  export DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1
+  # A first boot may still be running cloud-init, which can hold apt.
+  timeout 600 cloud-init status --wait >/dev/null 2>&1 || echo 'cloud-init did not report done; continuing'
+  # Finishes a dpkg run that a stop interrupted (`stop` mid-apt).
+  with_lock_retries dpkg --configure -a || stage_fail 'dpkg --configure -a kept failing: the dpkg database needs a hand (see the journal)'
+  with_lock_retries apt_get update || stage_fail 'apt-get update kept failing for 5 min (see the journal)'
+  # shellcheck disable=SC2086  # the list is one word per package
+  with_lock_retries apt_get -y install $PACKAGES || stage_fail 'apt-get install kept failing for 5 min (see the journal)'
+  echo "$(wc -w <<< "$PACKAGES" | tr -d ' ') packages installed" >&3
+}
+
+# Live checks capture their tool's output before matching it: a `| grep -q`
+# under pipefail could fail a passing check when grep exits early.
+# shellcheck disable=SC2016,SC2086  # dpkg-query's own ${Status}; one word per package
+check_packages() {
+  local status want have
+  status=$(dpkg-query -W -f='${Status}\n' $PACKAGES 2>/dev/null) || return 1
+  want=$(wc -w <<< "$PACKAGES")
+  have=$(grep -c '^install ok installed$' <<< "$status") || have=0
+  (( have == want ))
+}
+
+stage_libvirt() {
+  kvm_usable || stage_fail 'no usable /dev/kvm: the instance needs nested virtualization (NestedVirtualization=enabled on a supported type)'
+  usermod -aG libvirt,kvm "$LAB_USER" || stage_fail "cannot add $LAB_USER to the libvirt and kvm groups"
+  rewrite "$ROOT_PREFIX/etc/environment" environment_with_uri || stage_fail 'cannot set LIBVIRT_DEFAULT_URI in /etc/environment'
+  rewrite "$ROOT_PREFIX/etc/nsswitch.conf" with_libvirt_guest || stage_fail 'cannot add libvirt_guest to /etc/nsswitch.conf'
+  grep -Eq '^hosts:.*[[:space:]]libvirt_guest([[:space:]]|$)' "$ROOT_PREFIX/etc/nsswitch.conf" \
+    || stage_fail 'the nsswitch hosts line still lacks libvirt_guest'
+  write_file "$ROOT_PREFIX/etc/default/libvirt-guests" "$(libvirt_guests_conf)" 0644 \
+    || stage_fail 'cannot write /etc/default/libvirt-guests'
+  systemctl enable --now libvirt-guests.service || stage_fail 'cannot enable libvirt-guests.service'
+  virsh_sys net-autostart default || stage_fail 'cannot autostart the default network'
+  net_active || virsh_sys net-start default || stage_fail 'cannot start the default network'
+  echo 'kvm ok, default network active' >&3
+}
+
+check_libvirt() { kvm_usable && net_active; }
+
+kvm_usable() { [[ -c /dev/kvm ]] && kvm-ok >/dev/null 2>&1; }
+virsh_sys() { virsh -c "$LIBVIRT_URI" "$@"; }
+
+net_active() {
+  local info key value
+  info=$(virsh_sys net-info default 2>/dev/null) || return 1
+  while read -r key value; do
+    [[ $key != Active: ]] || { [[ $value == yes ]]; return; }
+  done <<< "$info"
+  return 1
+}
+
+# rewrite <file> <transform> — the file through a pure transform, in place
+rewrite() {
+  local text new
+  text=$(cat "$1") || return 1
+  new=$("$2" "$text") || return 1
+  write_file "$1" "$new" 0644
+}
+
+# The ruleset loads here with nft -f itself, never by restarting the unit:
+# libvirtd requires the unit, so a restart would restart libvirtd too. The
+# start only marks a freshly enabled unit active (a no-op once it is).
+stage_guard() {
+  write_file "$ROOT_PREFIX$GUARD_RULES" "$(guard_ruleset)" 0644 || stage_fail "cannot write $GUARD_RULES"
+  write_file "$SYSTEMD_DIR/$GUARD_SERVICE" "$(guard_unit)" 0644 || stage_fail "cannot write $GUARD_SERVICE"
+  systemctl daemon-reload || stage_fail 'systemctl daemon-reload failed'
+  systemctl enable "$GUARD_SERVICE" || stage_fail "cannot enable $GUARD_SERVICE"
+  nft -f "$ROOT_PREFIX$GUARD_RULES" || stage_fail "loading $GUARD_RULES failed (nft -f): see the journal"
+  systemctl start "$GUARD_SERVICE" || stage_fail "cannot start $GUARD_SERVICE"
+  check_guard || stage_fail 'the guard chain is not loaded after nft -f'
+  echo 'virbr0 to 169.254.0.0/16 dropped' >&3
+}
+
+check_guard() {
+  local chain
+  systemctl is-enabled --quiet "$GUARD_SERVICE" || return 1
+  chain=$(nft list chain inet helios_lab_guard forward_guard 2>/dev/null) || return 1
+  [[ $chain == *'iifname "virbr0" ip daddr 169.254.0.0/16 drop'* ]]
+}
+
+# --- install, progress, journal ----------------------------------------------
+# cmd_install <dir> — the push's last step, as root: each pushed file to its
+# place (install_dest), atomically, then a systemd reload. The directory goes
+# afterwards; only one named like the push's own is ever removed.
+cmd_install() {
+  local stage=${1:-} f spec dest mode
+  require_root install
+  [[ -d $stage && ${stage##*/} == helios-lab-push.* ]] || die "install takes the push's directory, not '$stage'"
+  for f in "$stage"/*; do
+    [[ -f $f ]] || continue
+    spec=$(install_dest "${f##*/}") || die "no install rule for ${f##*/}"
+    read -r dest mode <<< "$spec"
+    write_file "$dest" "$(<"$f")" "$mode" || die "cannot install $dest"
+  done
+  systemctl daemon-reload || die 'systemctl daemon-reload failed'
+  # --- Extension point (U4) ---
+  # Enable the idle timer, then, only if that succeeded, disarm the dead-man
+  # timer. Until U4 lands, nothing here touches helios-lab-deadman.timer, so
+  # the dead-man timer stays armed.
+  rm -rf "$stage"
+  # The install's epoch, on the host's clock: up re-runs a provision that
+  # was already active and so began before this push (lib/remote.sh).
+  date +%s
+}
+
+cmd_progress_reset() {
+  require_root progress-reset
+  mkdir -p "$MARKER_DIR"
+  : > "$PROGRESS_FILE"
+  chmod 0644 "$PROGRESS_FILE"
+}
+
+# cmd_progress — the Mac's poll: the progress file, then the unit's state
+cmd_progress() {
+  [[ ! -f $PROGRESS_FILE ]] || cat "$PROGRESS_FILE"
+  printf 'unit %s %s\n' "$(unit_property ActiveState)" "$(unit_property Result)"
+}
+
+unit_property() {
+  local value
+  value=$(systemctl show -p "$1" --value "$SERVICE" 2>/dev/null) || value=''
+  echo "${value:-unknown}"
+}
+
+# cmd_journal [n|all] — the unit's journal since the current run began (the
+# first progress line's epoch); the last n lines, 20 by default
+cmd_journal() {
+  local n=${1:-20} since
+  local -a args=(-u "$SERVICE" -o cat --no-pager)
+  [[ $n == all || $n =~ ^[1-9][0-9]{0,4}$ ]] || die 'usage: helios-lab-host journal [<lines>|all]'
+  since=$(run_epoch)
+  [[ -z $since ]] || args+=(--since "@$since")
+  [[ $n == all ]] || args+=(-n "$n")
+  journalctl "${args[@]}"
+}
+
+# run_epoch -> the epoch of the current run's first progress line, or nothing
+run_epoch() {
+  local epoch rest
+  [[ -f $PROGRESS_FILE ]] || return 0
+  read -r epoch rest < "$PROGRESS_FILE" || return 0
+  [[ ! $epoch =~ ^[0-9]+$ ]] || echo "$epoch"
+}
+
+require_root() { (( EUID == 0 )) || die "$1 must run as root"; }
+
+main() {
+  set -euo pipefail
+  case ${1:-} in
+    install)        cmd_install "${2:-}" ;;
+    provision)      cmd_provision ;;
+    progress-reset) cmd_progress_reset ;;
+    progress)       cmd_progress ;;
+    journal)        cmd_journal "${2:-20}" ;;
+    *)              die "usage: $HOST_SELF install <dir> | provision | progress-reset | progress | journal [<lines>|all]" ;;
+  esac
+}
+
+# Run only when executed, so the Mac suite can source the pure functions.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi
