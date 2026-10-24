@@ -195,3 +195,5 @@ unset __conda_setup
 
 [ -f "/Users/admin/.ghcup/env" ] && . "/Users/admin/.ghcup/env" # ghcup-env
 export PATH=/opt/homebrew/share/google-cloud-sdk/bin:"$PATH"
+# life meta-system — one command. `life` alone, or `life <whatever you thought>`
+alias life='node ~/Code/career/tools/life.ts'
