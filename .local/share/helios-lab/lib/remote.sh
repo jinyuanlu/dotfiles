@@ -22,7 +22,7 @@
 #   without one is an interactive login (helios-lab ssh).
 # ssh-keyscan, which reads the key a host offers, is the one call without -F.
 #
-# Requires from the entry: PROFILE, SSH_CONFIG, KNOWN_HOSTS, LAB_KEY,
+# Requires from the entry: PROFILE, STATE_DIR, SSH_CONFIG, KNOWN_HOSTS, LAB_KEY,
 # RETRY_SECONDS, IDLE_MINUTES, ENGVM_PIN, HELIOS_LAB_HOME, state_dir_ensure,
 # die, warn, attempt, EX_*; aws.sh: aws_console_output, first_line, REGION, US;
 # state.sh: fmt_elapsed, fmt_duration, join_dot, count_rows, fingerprint_of,
@@ -48,10 +48,22 @@ readonly GUEST_RESTART_ATTEMPTS=30       # 5 min
 # itself runs to completion under pfexec (a bare BEGIN would run forever).
 # Both run in one connection: each check's output (its stderr joined in),
 # then a marker line with its exit status (smoke_part reads them back).
+# Bounded on the guest, where GNU timeout can't be assumed: past uname (a
+# syscall), a watchdog gives pfexec and dtrace SMOKE_TIMEOUT_S, then says so
+# on stderr and SIGKILLs the remote shell's whole process group (sshd makes
+# the shell its leader), so nothing is left holding the channel open and ssh
+# returns. Its sleep holds no channel fd, and the run cancels it once
+# dtrace's marker is out, so a passing check never waits on it. A run cut
+# short settles nothing: smoke_cut_short makes it a wait, and the poll goes
+# on. The Mac side needs no timer of its own: the fragment's
+# ServerAliveInterval notices a dead link.
+# Keep `uname` the first word: tests/stubs/ssh names its reply for it.
 readonly SMOKE_UNAME='uname -o'
 readonly SMOKE_DTRACE="pfexec dtrace -n 'BEGIN { exit(0); }'"
 readonly SMOKE_MARK=helios-lab-smoke
-readonly SMOKE_COMMAND="$SMOKE_UNAME 2>&1; echo \"$SMOKE_MARK uname \$?\"; $SMOKE_DTRACE 2>&1; echo \"$SMOKE_MARK dtrace \$?\""
+readonly SMOKE_TIMEOUT_S=30
+readonly SMOKE_WATCHDOG="( sleep $SMOKE_TIMEOUT_S >/dev/null 2>&1; echo \"$SMOKE_MARK timeout\" >&2; kill -9 -\$\$ 2>/dev/null || kill -9 \$\$ ) & w=\$!"
+readonly SMOKE_COMMAND="$SMOKE_UNAME 2>&1; echo \"$SMOKE_MARK uname \$?\"; $SMOKE_WATCHDOG; $SMOKE_DTRACE 2>&1; echo \"$SMOKE_MARK dtrace \$?\"; kill \$w 2>/dev/null || :"
 # On the host, as helios-lab-host names them (tests check they agree).
 readonly GUEST_MARKER=/var/lib/helios-lab/guest-verified
 readonly GUEST_NAME=helios   # engvm's VM name, which libnss-libvirt resolves
@@ -608,6 +620,18 @@ smoke_result() {
   fi
 }
 
+# smoke_cut_short <ssh exit status> <its stderr> -> 0 when the run ended
+# before it could answer: the watchdog's mark, or the remote shell killed by
+# a signal (128+N, short of ssh's own 255). Neither says anything about the
+# guest's DTrace, so the poll waits and tries again.
+smoke_cut_short() {
+  case $1 in
+    0)                                   return 1 ;;
+    129|1[3-9][0-9]|2[0-4][0-9]|25[0-4]) return 0 ;;
+  esac
+  [[ $'\n'$2$'\n' == *$'\n'"$SMOKE_MARK timeout"$'\n'* ]]
+}
+
 # guest_attempts <verified: yes|no> -> polls for the guest: a first boot
 # gets the long budget, a verified guest's restart the short one
 guest_attempts() {
@@ -923,13 +947,71 @@ guest_bringup() {
   verified=$(guest_verified_of "$2")
   note=$(guest_mismatch "$2")
   [[ -z $note ]] || warn "$note"
+  guest_seen "$1" "$verified"
   [[ $verified == yes ]] || guest_key_forget "$1"
   guest_wait "$verified" "$2"
-  [[ $verified == yes ]] || guest_mark_verified
+  [[ $verified == yes ]] || { guest_mark_verified; guest_seen "$1" yes; }
+}
+
+# guest_seen <instance-id> <verified: yes|no> — this Mac's record that the
+# host holds guest-verified for <instance-id>'s guest: STATE_DIR/<id>.guest-
+# verified while it does, nothing while it doesn't. A stopped host can't be
+# asked, so status reads this (guest_verified_seen) to say "guest intact":
+# never the guest alias's pin, which any guest this Mac reached leaves,
+# verified or not, and whose disk the next up recreates. Only up writes it,
+# at each look it takes at the guest (guest_before_provision,
+# guest_bringup), and once guest_mark_verified succeeded.
+guest_seen() {
+  case $2 in
+    yes) state_dir_ensure; : > "$(guest_seen_file "$1")" ;;
+    *)   rm -f "$(guest_seen_file "$1")" ;;
+  esac
+}
+
+guest_seen_file() { echo "$STATE_DIR/$1.guest-verified"; }
+
+# guest_verified_seen <instance-id> -> 0 when this Mac last saw its guest verified
+guest_verified_seen() { [[ -f $(guest_seen_file "$1") ]]; }
+
+# guest_recreate_note <status reply> -> the warning when the provision run
+# about to start recreates an unverified guest that exists: the guest
+# stage's create branch (helios-lab-host guest_action: no marker, no create
+# unit running), which runs engvm's destroy.sh first. A guest reached with
+# `helios-lab ssh guest` before it passed the smoke check is one. Nothing
+# for a verified guest, a first boot under way, no domain, or a libvirt
+# that can't say (a fresh host has none yet). (pure)
+guest_recreate_note() {
+  local domain
+  [[ $(guest_verified_of "$1") == no ]] || return 0
+  domain=$(status_or "$1" domain unknown)
+  case $(status_or "$1" create unknown):$domain in
+    active:*|activating:*|*:absent|*:unknown) return 0 ;;
+  esac
+  echo "the guest ($GUEST_NAME, $domain) never passed the smoke check, so this up recreates it: its disk, and anything done in it, is lost"
+}
+
+# guest_before_provision <instance-id> <status reply> — up's look at the
+# guest before it starts the provision run: this Mac's record follows the
+# host's (guest_seen), and a guest the run is about to recreate is named
+# before its disk goes
+guest_before_provision() {
+  local note
+  guest_seen "$1" "$(guest_verified_of "$2")"
+  note=$(guest_recreate_note "$2")
+  [[ -z $note ]] || warn "$note"
 }
 
 # host_status -> one `helios-lab-host status` reply
 host_status() { host_poll "sudo $HOST_HELPER status" 'reading the guest status'; }
+
+# ready_reply <the reply taken before the guest wait> -> a fresh status reply
+# for the ready screen's countdown (the wait may have spanned idle checks),
+# or that one when the host can't be asked again: the guest is verified by
+# then, and a display detail never fails up
+ready_reply() {
+  local out
+  if out=$(ssh_capture host "sudo $HOST_HELPER status" < /dev/null); then printf '%s\n' "$out"; else printf '%s\n' "$1"; fi
+}
 
 # guest_key_forget <instance-id> — drops the guest alias's pin, if any
 guest_key_forget() {
@@ -968,12 +1050,17 @@ guest_wait() {
   guest_timeout "$1" "$reply" "$shown"
 }
 
-# smoke_check -> pass, or wait<US><why> while the guest can't be reached yet;
-# dies on an answer that settles it: not illumos, or DTrace failing. One
-# connection runs both checks; uname's verdict is read first.
+# smoke_check -> pass, or wait<US><why> while the guest can't be reached yet
+# or the run was cut short; dies on an answer that settles it: not illumos,
+# or DTrace failing. One connection runs both checks; uname's verdict is
+# read first.
 smoke_check() {
   local out rc=0 answer status said
   out=$(ssh_capture guest "$SMOKE_COMMAND" < /dev/null) || rc=$?
+  if smoke_cut_short "$rc" "$out"; then
+    printf 'wait%s%s\n' "$US" "the smoke check was cut short on the guest (exit $rc): pfexec and dtrace get ${SMOKE_TIMEOUT_S}s"
+    return 0
+  fi
   answer=$(smoke_result "$rc" "$out" uname)
   status=${answer%%"$US"*} said=${answer#*"$US"}
   case $(uname_verdict "$status" "$said") in

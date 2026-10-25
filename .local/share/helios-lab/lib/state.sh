@@ -304,7 +304,7 @@ keep_line() {
   case $1 in
     off) join_dot 'keep · cleared' "the host $(autostop_field "$2")" ;;
     *)   is_epoch "$1" || return 1
-         echo "keep · $(ready_stop_note "$2" "$1")" ;;
+         echo "keep · $(ready_stop_note "$2" "$1" "$(autostop_field "$2")")" ;;
   esac
 }
 
@@ -698,27 +698,32 @@ stopped_while_connecting() {
   esac
 }
 
-# ready_screen <elapsed-s|""> <idle-minutes> <keep deadline|none> -> what a
-# successful up ends with (R14): the smoke check's result, one DTrace
-# one-liner to try in the guest, the stop that is armed and how to hold or
-# end it, then one runnable next command. The stop is the idle timer: up
-# reaches this screen only after its push's install armed it (and then
-# disarmed the dead-man timer), and the window is the one that push carried.
+# ready_screen <elapsed-s|""> <idle-minutes> <keep deadline|none> <auto-stop
+# field> -> what a successful up ends with (R14): the smoke check's result,
+# one DTrace one-liner to try in the guest, the stop that is armed and how to
+# hold or end it, then one runnable next command. The stop is the idle
+# timer: up reaches this screen only after its push's install armed it (and
+# then disarmed the dead-man timer), and the window is the one that push
+# carried. <auto-stop field> is the host's own countdown (remote.sh
+# idle_field over a status reply), so the screen never promises more than
+# the host will wait: the push restarts the window, and checks may have
+# counted since.
 readonly DTRACE_TRY="pfexec dtrace -n 'syscall:::entry { @[execname] = count(); }'"
 ready_screen() {
   join_dot "guest ready${1:+ in $(fmt_elapsed "$1")}" illumos 'dtrace ok'
   echo "  in the guest, try: $DTRACE_TRY  (Ctrl-C prints system calls by process)"
-  echo "  $(ready_stop_note "$2" "$3") · helios-lab stop when done"
+  echo "  $(ready_stop_note "$2" "$3" "$4") · helios-lab stop when done"
   echo 'next: helios-lab ssh'
 }
 
-# ready_stop_note <idle-minutes> <keep deadline|none> -> the idle stop, and
-# the keep that holds it off or clears its hold
+# ready_stop_note <idle-minutes> <keep deadline|none> <auto-stop field> -> the
+# idle stop (that field, while no keep holds it off), and the keep that
+# holds it off or clears its hold
 ready_stop_note() {
   if is_epoch "$2"; then
     echo "$(inhibited_field "$2"), then it stops after $1 min idle · helios-lab keep off clears it"
   else
-    echo "$(autostop_field "$1") · helios-lab keep 3h to hold it"
+    echo "$3 · helios-lab keep 3h to hold it"
   fi
 }
 

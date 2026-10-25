@@ -231,7 +231,10 @@ Before you disconnect from something long:
 Every open session counts as activity, whether it is `helios-lab ssh` to the
 guest or the host, or `helios-lab console`. A session whose Mac went to sleep
 stops counting within about 3 minutes. After a stop, `helios-lab up` restarts
-in about 40 seconds with the guest intact.
+in about 40 seconds with the guest intact, once it has passed up's smoke
+check. A guest that never did (a first boot `up` was interrupted in) is
+recreated by the next `up` once the host has stopped, and `up` says so
+before it starts.
 
 ---
 

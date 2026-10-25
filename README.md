@@ -256,6 +256,7 @@ Safety notes:
 - **`destroy` previews first.** Without `--yes` it only lists the instance, volume and security group and exits 2. `--yes` deletes exactly that, and the guest's disk goes with it. The lab key is never touched.
 - **`ssh`, `console` and `keep` never start a stopped host.** They say why it stopped (idle or you) and point at `helios-lab up`. Only `up` starts billing.
 - **The idle stop ends disconnected work.** No SSH session for the idle window means the host stops, and a guest job left running stops with it. Use `helios-lab keep 3h` before you walk away from a long run.
+- **Only a verified guest is kept.** A guest that never passed `up`'s smoke check (say, `up` was interrupted during its first boot, and the host then stopped) is recreated by the next `up`, and its disk is lost, even if you reached it with `helios-lab ssh`. `up` warns before it does that.
 - **Losing the lab key locks the guest out for good.** The key is baked into the guest when it is created, and it is never regenerated. Restoring a backup is the only fix short of `destroy`.
 - **One Mac at a time.** SSH ingress follows the Mac that last connected, and only the creating Mac's key is authorized.
 - **This repo is public.** `.gitignore` keeps `~/.local/state/` (the SSH fragment and pinned host keys) and the lab key out of `yadm add`. No credential, and no pointer to one, belongs in it.

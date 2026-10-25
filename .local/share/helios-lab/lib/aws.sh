@@ -355,10 +355,16 @@ lab_tag_spec() {
 # aws_launch <type> <subnet-id> <az> <group-id> <key-fingerprint> <user-data>
 # -> "instance-id<US>launch-time". One attempt only: a capacity error exits 5
 # naming the type and the override; there is no retry loop.
+# Invariant: only EC2's own capacity answer is read as "nothing was
+# launched". Any other failure was already reported, typed, by aws_expect
+# inside the capture, and its status passes on unchanged: a network failure
+# (8) leaves the outcome unknown, so the in-flight billing notice prints
+# (notice_due); auth stays 3, anything else 1.
 aws_launch() {
   local out rc=0
   out=$(aws_run_instances InsufficientInstanceCapacity "$1" "$2" "$5" "$6" --security-group-ids "$4" \
     --query "$Q_LAUNCHED") || rc=$?
+  (( rc == 0 )) || [[ ${out%%"$US"*} == InsufficientInstanceCapacity ]] || return "$rc"
   (( rc == 0 )) || die "$EX_CAPACITY" "EC2 has no $1 capacity in $3 right now; nothing was launched" \
     "retry later, or create with another type: HELIOS_LAB_INSTANCE_TYPE=<type> helios-lab up" \
     "types: a non-metal size of $(nested_virt_families), with at least 4 vCPU and 16 GiB" \
@@ -368,11 +374,15 @@ aws_launch() {
 
 # aws_start <instance-id> <type> <az> — a capacity error only says to retry:
 # changing a stopped instance's type needs a permission the policy withholds,
-# so the type override is no remedy here.
+# so the type override is no remedy here. As in aws_launch, only the
+# capacity answer means "stopped and intact"; any other failure keeps its
+# typed status (a network failure: the start may have landed, so 8 and the
+# in-flight notice).
 aws_start() {
   local out rc=0
   out=$(aws_expect InsufficientInstanceCapacity ec2 start-instances --instance-ids "$1" --query "$Q_STARTING") \
     || rc=$?
+  (( rc == 0 )) || [[ ${out%%"$US"*} == InsufficientInstanceCapacity ]] || return "$rc"
   (( rc == 0 )) || die "$EX_CAPACITY" "EC2 has no $2 capacity in $3 right now; $1 is stopped and intact" \
     'retry in a few minutes: helios-lab up' "aws said: ${out#*"$US"}"
 }

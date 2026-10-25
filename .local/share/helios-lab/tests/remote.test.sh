@@ -38,7 +38,7 @@ readonly OTHER_FP=SHA256:kz+Tw/36PkRNhaOvv5otG5S4Peg4eicnqhu/ViZnv2E   # its ECD
 readonly PIN=8ef18ef53d3baa03eebe5f2238a3a4ceef1b6f4a
 readonly HELPER_PATH=/usr/local/libexec/helios-lab/helios-lab-host
 readonly PUSH_CMD="sudo bash -c 'stage=\$(mktemp -d /tmp/helios-lab-push.XXXXXX) && cd \"\$stage\" && bash -s && exec bash ./helios-lab-host install \"\$stage\"'"
-readonly SMOKE_CMD="uname -o 2>&1; echo \"helios-lab-smoke uname \$?\"; pfexec dtrace -n 'BEGIN { exit(0); }' 2>&1; echo \"helios-lab-smoke dtrace \$?\""
+readonly SMOKE_CMD="uname -o 2>&1; echo \"helios-lab-smoke uname \$?\"; ( sleep 30 >/dev/null 2>&1; echo \"helios-lab-smoke timeout\" >&2; kill -9 -\$\$ 2>/dev/null || kill -9 \$\$ ) & w=\$!; pfexec dtrace -n 'BEGIN { exit(0); }' 2>&1; echo \"helios-lab-smoke dtrace \$?\"; kill \$w 2>/dev/null || :"
 readonly RFD26_LINE='seed · fetching and verifying the 2.4 GB Helios seed (about 5 min the first time) · meanwhile, read RFD 26: https://rfd.shared.oxide.computer/rfd/0026'
 # The provision lines of a clean first run (progress_reply 'done')
 readonly STAGE_LINES="packages · done · 41s · 8 packages installed
@@ -364,11 +364,13 @@ next: helios-lab ssh" "$(steady <<< "$OUT" | sed -E 's/^(guest ready in )[0-9]+s
   assert_eq '' "$ERR"
   local cfg=$HELIOS_LAB_STATE_DIR/ssh_config
   assert_eq "ssh -F $cfg host $PUSH_CMD
+ssh -F $cfg host sudo $HELPER_PATH status
 ssh -F $cfg host sudo systemctl start helios-lab-provision.service
 ssh -F $cfg host $HELPER_PATH progress
 ssh -F $cfg host sudo $HELPER_PATH status
 ssh -F $cfg guest $SMOKE_CMD
-ssh -F $cfg host sudo $HELPER_PATH guest-verified" "$(ssh_calls)"
+ssh -F $cfg host sudo $HELPER_PATH guest-verified
+ssh -F $cfg host sudo $HELPER_PATH status" "$(ssh_calls)"   # the last: the ready screen's countdown
   assert_not_contains "$(calls)" 'StrictHostKeyChecking'   # no call loosens the fragment
   assert_not_contains "$(calls)" 'scp '
 }
@@ -860,6 +862,14 @@ fake_tools() {
   timeout() { tool timeout "$@"; return 2; }   # cloud-init status --wait: "degraded"
   sleep() { tool sleep "$@"; }
   kvm_usable() { [[ $KVM == yes ]]; }
+  # snap remove --purge <name>: removes the snap's /snap/<name>, as snapd
+  # does, unless SNAP_FAILS is set
+  snap() {
+    tool snap "$@"
+    [[ $1 == remove ]] || return 0
+    [[ -z ${SNAP_FAILS:-} ]] || { echo "error: cannot remove \"$3\": hand-written failure" >&2; return 1; }
+    rm -rf "$SANDBOX/root/snap/$3"
+  }
 }
 
 # fail_first <tool> <what it says while another apt holds the lock> — the
@@ -886,7 +896,7 @@ test_the_packages_stage_waits_out_apt_locks_and_never_prompts() {
   FAILS=2 stage_call stage_packages   # dpkg and apt-get update each find a lock twice
   assert_eq 0 "$RC" "the stage failed: $(<"$SANDBOX/stage.out")"
   assert_eq '8 packages installed' "$SUMMARY"
-  local apt='apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -q'
+  local apt='apt-get -o DPkg::Lock::Timeout=15 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -q'
   assert_eq "timeout 600 cloud-init status --wait
 dpkg --configure -a
 sleep 10
@@ -908,10 +918,66 @@ test_the_packages_stage_gives_up_after_its_lock_retries_with_a_reason() {
   fake_tools
   FAILS=99 stage_call stage_packages
   assert_eq 1 "$RC"
-  assert_eq 'dpkg --configure -a found the lock held in 30 tries, 10s apart: another apt or dpkg run holds it (see the journal)' "$SUMMARY"
+  assert_eq 'dpkg --configure -a found the lock held in 30 tries, 10s apart, over about 5 min: another apt or dpkg run holds it (see the journal)' "$SUMMARY"
   assert_eq "$LOCK_TRIES" "$(tools_log | grep -c '^dpkg ')" 'bounded tries'
   assert_eq $(( LOCK_TRIES - 1 )) "$(tools_log | grep -c '^sleep 10$')" 'a wait between tries'
   assert_eq 0 "$(tools_log | grep -c '^apt-get ' || true)" 'no apt after dpkg failed'
+}
+
+# The AMI's SSM agent snap could open Session Manager past the ssh ingress
+# rule (helios-lab-host SSM_SNAP): purged first, before any apt step; a host
+# without it is left alone; a removal that fails fails the stage.
+test_the_packages_stage_purges_the_ssm_agent_snap_and_tolerates_its_absence() {
+  host_env
+  fake_tools
+  local snapdir=$SANDBOX/root/snap/amazon-ssm-agent
+  mkdir -p "$snapdir/current"
+  stage_call stage_packages
+  assert_eq 0 "$RC" "the stage failed: $(<"$SANDBOX/stage.out")"
+  assert_eq '8 packages installed · amazon-ssm-agent removed' "$SUMMARY"
+  assert_eq $'timeout 600 cloud-init status --wait\ntimeout 300 snap wait system seed.loaded\nsnap remove --purge amazon-ssm-agent\ndpkg --configure -a' \
+    "$(tools_log | sed -n 1,4p)" 'seeded, purged, then apt'
+  [[ ! -e $snapdir ]] || fail 'the snap is still installed'
+  # Absent (a second run, or an AMI without it): no snap call at all.
+  : > "$SANDBOX/tools.log"
+  stage_call stage_packages
+  assert_eq 0 "$RC"
+  assert_eq '8 packages installed' "$SUMMARY"
+  assert_eq 0 "$(tools_log | grep -c 'snap' || true)" 'snap calls'
+  # A removal snapd refuses fails the stage before apt runs.
+  : > "$SANDBOX/tools.log"
+  mkdir -p "$snapdir/current"
+  SNAP_FAILS=1 stage_call stage_packages
+  assert_eq 1 "$RC"
+  assert_eq 'cannot remove the amazon-ssm-agent snap (see the journal): with SSM Default Host Management it is a way in past the ssh ingress rule' "$SUMMARY"
+  assert_eq 0 "$(tools_log | grep -c '^apt-get ' || true)" 'no apt after the failed removal'
+}
+
+test_the_ssm_agent_is_in_the_packages_input_and_its_return_fails_the_live_check() {
+  host_env
+  assert_contains "$(stage_spec packages)" 'snap remove --purge amazon-ssm-agent'
+  # A host provisioned before the removal existed runs the stage again.
+  assert_eq run "$(stage_decision "$(spec_input "packages r1: $PACKAGES")" "$(stage_input packages)")"
+  # shellcheck disable=SC2329  # called by check_packages
+  dpkg-query() { local n; for (( n = 1; n <= 8; n++ )); do echo 'install ok installed'; done; }
+  check_packages || fail 'all packages installed and no agent failed its check'
+  mkdir -p "$SANDBOX/root/snap/amazon-ssm-agent"
+  if check_packages; then fail 'the agent back passed the live check'; fi
+}
+
+# apt waits for dpkg's frontend lock itself, but only briefly: the retry
+# loop governs, and its message states the budget it really spent
+test_an_apt_lock_held_throughout_fails_stating_the_true_budget() {
+  host_env
+  fake_tools
+  FAILS=99 FAIL_TOOL=apt-get stage_call stage_packages
+  assert_eq 1 "$RC"
+  assert_eq 'apt-get update found the lock held in 30 tries, 10s apart, over about 12 min: another apt or dpkg run holds it (see the journal)' "$SUMMARY"
+  assert_eq "$LOCK_TRIES" "$(tools_log | grep -c "^apt-get -o DPkg::Lock::Timeout=$APT_LOCK_WAIT_S ")" 'bounded tries, each bounded'
+  # 30 tries of at most 15 s inside apt, 29 waits of 10 s between them
+  assert_eq 740 "$(lock_budget_s "$APT_LOCK_WAIT_S")"
+  assert_eq 290 "$(lock_budget_s 0)" 'dpkg fails at once: only the waits between tries'
+  (( APT_LOCK_WAIT_S <= 2 * LOCK_WAIT_S )) || fail "apt's own lock wait ($APT_LOCK_WAIT_S s) would govern the loop"
 }
 
 test_a_packages_failure_that_is_not_a_held_lock_fails_at_once_with_apts_own_line() {

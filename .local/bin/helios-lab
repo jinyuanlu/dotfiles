@@ -350,13 +350,14 @@ caller_access() {
 
 # guest_headline_field <state> <instance-id> <probe> -> the headline's guest
 # field: a running host's from its probe; a stopped host can't be asked,
-# but stop keeps the disk, so a guest this Mac has reached (its alias is
-# pinned, which only a reached guest leaves, and up drops for any guest not
-# verified yet) is intact; otherwise nothing
+# but stop keeps the disk, and a verified guest is never recreated, so a
+# guest this Mac last saw verified (lib/remote.sh guest_seen) is intact;
+# otherwise nothing. Not the guest alias's pin: an unverified guest has one
+# too once reached, and the next up recreates it.
 guest_headline_field() {
   case $1 in
     running) [[ $(probe_kind "$3") != ok ]] || guest_field "$(probe_body "$3")" ;;
-    stopped) if hostkey_pinned "$2-guest"; then echo 'guest intact'; fi ;;
+    stopped) if guest_verified_seen "$2"; then echo 'guest intact'; fi ;;
   esac
 }
 
@@ -603,11 +604,14 @@ up_follow_stop() {
 # the instance is running and the re-lookup has passed, with the billing
 # notice armed, so any failure here prints it. The host key is verified
 # against the console on first contact, the fragment is rendered for this
-# IP, host/ and its config are pushed (every up: R13), and the provision
-# unit is started and followed stage by stage: packages, libvirt, guard,
-# engvm, seed (with the RFD 26 line) and guest. Then the smoke check through
-# the guest alias (lib/remote.sh guest_bringup) and the ready screen, with
-# the keep in force, if any.
+# IP, host/ and its config are pushed (every up: R13), the host is asked
+# about its guest (a guest the run will recreate is named first:
+# lib/remote.sh guest_before_provision), and the provision unit is started
+# and followed stage by stage: packages, libvirt, guard, engvm, seed (with
+# the RFD 26 line) and guest. Then the smoke check through the guest alias
+# (lib/remote.sh guest_bringup) and the ready screen, with the keep in
+# force, if any, and the host's own idle countdown, which the push
+# restarted (helios-lab-host install).
 # Invariant: from launch onward every boot has a stop armed. The push's
 # install arms the idle timer before it disarms the dead-man timer, and dies
 # otherwise, so once host_push returns the idle timer is the stop armed, and
@@ -619,13 +623,17 @@ up_connect() {
   pushed=$(host_push) || return
   push_line
   notice_set "$id" "$type" "$(launch_epoch "$launch" "$(date +%s)")" idle
+  reply=$(host_status) || return
+  guest_before_provision "$id" "$reply"
   provision_start
   provision_follow "$pushed"
   [[ ${UP_VERBOSE:-quiet} != verbose ]] || provision_journal_print
   echo 'host ready · KVM, libvirt and the metadata guard are in place'
   reply=$(host_status) || return
   guest_bringup "$id" "$reply"
-  ready_screen "$(up_elapsed)" "$IDLE_MINUTES" "$(inhibit_of "$reply")"
+  reply=$(ready_reply "$reply")
+  ready_screen "$(up_elapsed)" "$IDLE_MINUTES" "$(inhibit_of "$reply")" \
+    "$(idle_field "$reply" "$(date +%s)" "$IDLE_MINUTES")"
 }
 
 # up_elapsed -> seconds since this up started, or nothing outside cmd_up

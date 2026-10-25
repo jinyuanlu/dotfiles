@@ -547,6 +547,59 @@ test_a_drop_in_sshd_rejects_is_removed_and_the_stop_is_not_handed_over() {
   assert_not_contains "$(tools_log)" 'deadman'
 }
 
+# A host idle for 55 of its 60 min when up reattaches: its brief sessions
+# are unlikely to meet a check, so without the push's restart the next
+# check (5 min away at most) would stop it right after up said ready.
+test_a_reattaching_up_restarts_the_idle_window_and_its_ready_screen_says_so() {
+  local before after
+  world_running
+  run_cli up
+  assert_rc 0
+  STAGE=$SANDBOX/tmp/helios-lab-push.test
+  unpack_push 1 "$STAGE"
+  before=$( host_env; fake_idle_tools; host_conf 60; record "$NOW increment 11 12"; idle_facts "$(unit_show)" )
+  after=$( host_env; fake_idle_tools; FAKE_NOW=$(( NOW + 60 ))
+           cmd_install "$STAGE" > /dev/null; idle_facts "$(unit_show)" )
+  assert_eq "$(( NOW + 60 )) reset 0 12" "$(recorded)" 'the push restarted the window'
+  load_cli
+  assert_eq 'auto-stops in ~5 min' "$(idle_field "$before" "$NOW" 60)" 'as the host stood before the push'
+  assert_eq '  auto-stops after 60 min idle · helios-lab keep 3h to hold it · helios-lab stop when done' \
+    "$(ready_screen 30 60 "$(inhibit_of "$after")" "$(idle_field "$after" $(( NOW + 60 )) 60)" | sed -n 3p)" \
+    'the full window, right after the reattach'
+}
+
+test_the_window_restart_comes_before_the_handoff_and_dies_without_one() {
+  install_pushed
+  mkdir -p "$SANDBOX/root/run"
+  : > "$SANDBOX/root/run/helios-lab"   # a file where its directory belongs: the record can't be written
+  RC=0; ERR=$( (cmd_install "$STAGE") 2>&1 >/dev/null ) || RC=$?
+  assert_eq 1 "$RC"
+  assert_contains "$ERR" 'cannot restart the idle window in /run/helios-lab/idle: the stop was not handed over'
+  assert_not_contains "$(tools_log)" 'idle.timer'
+  assert_not_contains "$(tools_log)" 'deadman'
+}
+
+# The ready screen reads the host's own countdown from a status reply taken
+# once the guest is verified: a first boot's wait can span idle checks.
+test_the_ready_screen_shows_the_hosts_own_countdown_after_the_guest_wait() {
+  world_running
+  # calls 1 and 2: up's look before provisioning, then the guest's
+  guest_status_reply first-boot 'done' counting | ssh_reply_seq ssh-host-status 3
+  run_cli up
+  assert_rc 0
+  assert_eq '  auto-stops in ~44 min · helios-lab keep 3h to hold it · helios-lab stop when done' \
+    "$(tail -2 <<< "$OUT" | head -1)" '3 idle checks of 12 so far, the last a minute ago'
+  # A host that can't be asked once more: the reply in hand, and up still succeeds.
+  rm -rf "$STUB_SSH_DIR"/{.calls,.stdin} "$STUB_SSH_DIR"/ssh-host-status.3
+  again
+  ssh_reply_error ssh-host-status.3 255 "ssh: connect to host $HOST_IP port 22: Operation timed out"
+  run_cli up
+  assert_rc 0
+  assert_eq '  auto-stops after 60 min idle · helios-lab keep 3h to hold it · helios-lab stop when done' \
+    "$(tail -2 <<< "$OUT" | head -1)"
+  assert_eq '' "$ERR"
+}
+
 test_up_fails_loudly_when_the_install_cannot_arm_the_idle_timer() {
   world_running
   ssh_reply_error ssh-host-bash 1 'helios-lab-host: cannot arm helios-lab-idle.timer: the dead-man timer stays armed, so the host still stops 2h after boot'

@@ -28,9 +28,9 @@
 #   /var/lib/helios-lab/guest-verified  the guest marker (single-marker protocol)
 #
 # Subcommands:
-#   install <dir>    place the pushed files, reload systemd and sshd, arm the
-#                    idle timer, then disarm the dead-man timer, print the
-#                    epoch (root; the push)
+#   install <dir>    place the pushed files, reload systemd and sshd, restart
+#                    the idle window, arm the idle timer, then disarm the
+#                    dead-man timer, print the epoch (root; the push)
 #   provision        run the stages under a lock (root; the unit's ExecStart)
 #   progress-reset   empty the progress file (root; the unit's ExecStartPre)
 #   progress         print the progress file and the unit's state (the Mac polls)
@@ -145,6 +145,15 @@ readonly STATUS_UNITS="$SERVICE $IDLE_TIMER $IDLE_SERVICE $DEADMAN_TIMER $CREATE
 # libnss-libvirt resolves `helios` for the Mac's ProxyJump; cpu-checker gives
 # kvm-ok; cpio is engvm's; nftables loads the guard.
 readonly PACKAGES='qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients libnss-libvirt cpu-checker cpio nftables'
+# The Ubuntu AMI ships Systems Manager's agent as a snap. The lab has no
+# instance profile, but with SSM Default Host Management Configuration on
+# for the account, the agent registers through IMDS alone, and Session
+# Manager then reaches a shell past the /32 tcp/22 ingress rule (R10: the
+# only way in), in sessions the idle check never counts. So the packages
+# stage purges it, whatever the account's settings; its live check sees it
+# come back. /snap/<name> exists exactly while snapd has the snap installed.
+readonly SSM_SNAP=amazon-ssm-agent
+readonly SSM_SNAP_DIR=$ROOT_PREFIX/snap/$SSM_SNAP
 
 die() { printf '%s: %s\n' "$HOST_SELF" "$1" >&2; exit 1; }
 
@@ -168,7 +177,7 @@ stage_decision() {
 stage_spec() {
   local pin
   case $1 in
-    packages) printf 'packages r1: %s\n' "$PACKAGES" ;;
+    packages) printf 'packages r2: %s; snap remove --purge %s\n' "$PACKAGES" "$SSM_SNAP" ;;
     libvirt)  printf 'libvirt r1: %s in libvirt,kvm; %s; network default active+autostart; nss libvirt_guest\n' \
                 "$LAB_USER" "$LIBVIRT_URI"
               libvirt_guests_conf ;;
@@ -279,6 +288,19 @@ lock_held() {
     *'locked by another process'*|*'database is locked'*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# lock_budget_s <one try's own lock wait, s> -> the longest with_lock_retries
+# waits out a held lock: LOCK_TRIES tries, each blocking up to that long,
+# with LOCK_WAIT_S between them
+lock_budget_s() { echo $(( LOCK_TRIES * $1 + (LOCK_TRIES - 1) * LOCK_WAIT_S )); }
+
+# lock_exhausted <what> <one try's own lock wait, s> -> the packages stage's
+# reason when every try found the lock held, with the true budget it spent
+# (to the nearest minute)
+lock_exhausted() {
+  printf '%s found the lock held in %s tries, %ss apart, over about %s min: %s\n' "$1" "$LOCK_TRIES" \
+    "$LOCK_WAIT_S" $(( ($(lock_budget_s "$2") + 30) / 60 )) 'another apt or dpkg run holds it (see the journal)'
 }
 
 # apt_said <apt or dpkg output> -> its own error line: the first "E: " or
@@ -752,23 +774,31 @@ cmd_provision() {
 
 # apt_get — no prompt can be answered here (StandardInput=null): a conffile
 # this helper edited (/etc/default/libvirt-guests) keeps the local version
-# when an upgrade ships a new one, instead of asking
+# when an upgrade ships a new one, instead of asking. DPkg::Lock::Timeout
+# lets apt itself wait for dpkg's frontend lock, but only APT_LOCK_WAIT_S:
+# short, so with_lock_retries' loop, not apt, governs how long a held lock
+# is waited out (lock_budget_s).
+readonly APT_LOCK_WAIT_S=15
 apt_get() {
-  apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -q "$@"
+  apt-get -o "DPkg::Lock::Timeout=$APT_LOCK_WAIT_S" -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold -q "$@"
 }
 
-# with_lock_retries <what> <command...> — inside a stage: runs the command,
-# then passes its output (stderr joined in) on to the journal, so it can be
-# read for a held lock. DPkg::Lock::Timeout covers only dpkg's frontend lock;
-# dpkg itself and `apt-get update`'s lists lock fail at once while another
-# apt holds them (apt-daily, on a first boot). So a failure that says a lock
+# with_lock_retries <what> <its own lock wait, s> <command...> — inside a
+# stage: runs the command, then passes its output (stderr joined in) on to
+# the journal, so it can be read for a held lock. A failure that says a lock
 # is held (lock_held) is tried again, up to LOCK_TRIES times LOCK_WAIT_S
 # apart; any other failure fails the stage at once, with apt's own error
-# line (apt_said).
+# line (apt_said). <its own lock wait> is how long one try may block on a
+# lock before it fails: APT_LOCK_WAIT_S for apt_get (DPkg::Lock::Timeout
+# covers only dpkg's frontend lock; `apt-get update`'s lists lock fails at
+# once), 0 for dpkg, which fails at once while another apt holds its lock
+# (apt-daily, on a first boot). The longest a held lock keeps a call here
+# is lock_budget_s of it, which the exhaustion message states.
 readonly LOCK_TRIES=30 LOCK_WAIT_S=10
 with_lock_retries() {
-  local what=$1 n out rc said
-  shift
+  local what=$1 own=$2 n out rc said
+  shift 2
   for (( n = 1; ; n++ )); do
     rc=0
     out=$("$@" 2>&1) || rc=$?
@@ -776,30 +806,47 @@ with_lock_retries() {
     (( rc != 0 )) || return 0
     said=$(apt_said "$out")
     lock_held "$out" || stage_fail "$what failed (exit $rc)${said:+: $said}"
-    (( n < LOCK_TRIES )) || stage_fail "$what found the lock held in $LOCK_TRIES tries, ${LOCK_WAIT_S}s apart: another apt or dpkg run holds it (see the journal)"
+    (( n < LOCK_TRIES )) || stage_fail "$(lock_exhausted "$what" "$own")"
     sleep "$LOCK_WAIT_S"
   done
 }
 
 stage_packages() {
+  local removed=''
   # needrestart only asks about services on upgraded libraries, and this
   # installs new packages: it sits out
   export DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1
   # A first boot may still be running cloud-init, which can hold apt.
   timeout 600 cloud-init status --wait >/dev/null 2>&1 || echo 'cloud-init did not report done; continuing'
+  # The way in past the ingress rule goes first, before anything apt may fail on.
+  if [[ -e $SSM_SNAP_DIR ]]; then ssm_agent_remove; removed=" · $SSM_SNAP removed"; fi
   # Finishes a dpkg run that a stop interrupted (`stop` mid-apt).
-  with_lock_retries 'dpkg --configure -a' dpkg --configure -a
-  with_lock_retries 'apt-get update' apt_get update
+  with_lock_retries 'dpkg --configure -a' 0 dpkg --configure -a
+  with_lock_retries 'apt-get update' "$APT_LOCK_WAIT_S" apt_get update
   # shellcheck disable=SC2086  # the list is one word per package
-  with_lock_retries 'apt-get install' apt_get -y install $PACKAGES
-  echo "$(wc -w <<< "$PACKAGES" | tr -d ' ') packages installed" >&3
+  with_lock_retries 'apt-get install' "$APT_LOCK_WAIT_S" apt_get -y install $PACKAGES
+  echo "$(wc -w <<< "$PACKAGES" | tr -d ' ') packages installed$removed" >&3
+}
+
+# ssm_agent_remove — inside the packages stage, once /snap/amazon-ssm-agent
+# shows the snap installed (a host without it, or without snapd, has nothing
+# to remove, so the stage is idempotent): purged with its data, no snapshot
+# kept (SSM_SNAP says why). snapd refuses a remove until a first boot has
+# seeded its snaps, so that is waited for, bounded.
+ssm_agent_remove() {
+  timeout 300 snap wait system seed.loaded || echo "snapd did not report its snaps seeded; removing $SSM_SNAP anyway"
+  snap remove --purge "$SSM_SNAP" \
+    || stage_fail "cannot remove the $SSM_SNAP snap (see the journal): with SSM Default Host Management it is a way in past the ssh ingress rule"
+  [[ ! -e $SSM_SNAP_DIR ]] || stage_fail "the $SSM_SNAP snap is still installed after snap remove --purge (see the journal)"
 }
 
 # Live checks capture their tool's output before matching it: a `| grep -q`
-# under pipefail could fail a passing check when grep exits early.
+# under pipefail could fail a passing check when grep exits early. The SSM
+# agent back (reinstalled by hand, say) fails it too, so the stage runs again.
 # shellcheck disable=SC2016,SC2086  # dpkg-query's own ${Status}; one word per package
 check_packages() {
   local status want have
+  [[ ! -e $SSM_SNAP_DIR ]] || return 1
   status=$(dpkg-query -W -f='${Status}\n' $PACKAGES 2>/dev/null) || return 1
   want=$(wc -w <<< "$PACKAGES")
   have=$(grep -c '^install ok installed$' <<< "$status") || have=0
@@ -1000,7 +1047,8 @@ transcript_lines() {
 # cmd_install <dir> — the push's last step, as root: each pushed file to its
 # place (install_dest), atomically, then a systemd reload, sshd's drop-in
 # applied, and the stop handed from the dead-man timer to the idle timer.
-# The directory goes afterwards; only one named like the push's own is ever
+# Every push also restarts the idle window (idle_window_restart). The
+# directory goes afterwards; only one named like the push's own is ever
 # removed. Any failure dies before the handoff completes, so up fails loudly
 # and whatever stop was armed stays armed.
 cmd_install() {
@@ -1015,6 +1063,7 @@ cmd_install() {
   done
   systemctl daemon-reload || die 'systemctl daemon-reload failed'
   sshd_apply
+  idle_window_restart
   idle_arm
   rm -rf "$stage"
   # The install's epoch, on the host's clock: up re-runs a provision that
@@ -1040,6 +1089,21 @@ sshd_apply() {
     die "sshd -t rejects the ssh config, so ${SSHD_DROPIN#"$ROOT_PREFIX"} was removed again and the stop was not handed over: ${out%%$'\n'*}"
   fi
   systemctl try-reload-or-restart "$SSH_SERVICE" || die "cannot reload $SSH_SERVICE for its drop-in"
+}
+
+# idle_window_restart — a push is the user at work, so the idle count goes
+# back to 0: the record the next check counts from (and status and up's
+# ready screen read) restarts the window. Without it, an up that reattaches
+# to a host idle for most of its window opens only brief sessions, which no
+# 5-minute check is likely to see, so the host could stop minutes after up
+# said ready. A check that races this sees the push's own ssh session and
+# resets too. Before the handoff: a record that can't be written dies with
+# whatever stop was armed still armed.
+idle_window_restart() {
+  local conf
+  conf=$(cat "$CONF_FILE" 2>/dev/null) || conf=''
+  write_file "$IDLE_RECORD" "$(idle_record "$(date +%s)" reset 0 "$(idle_required_of "$(idle_required "$conf")")")" 0644 \
+    || die "cannot restart the idle window in ${IDLE_RECORD#"$ROOT_PREFIX"}: the stop was not handed over"
 }
 
 # idle_arm — the handoff (R5). Invariant: from launch onward every boot has a

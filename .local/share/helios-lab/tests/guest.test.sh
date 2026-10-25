@@ -43,7 +43,10 @@ readonly PIN=$LAB_PIN
 readonly OTHER_PIN=0123456789abcdef0123456789abcdef01234567
 readonly HELPER_PATH=/usr/local/libexec/helios-lab/helios-lab-host
 readonly SMOKE_DTRACE_CMD="pfexec dtrace -n 'BEGIN { exit(0); }'"
-readonly SMOKE_CMD="uname -o 2>&1; echo \"helios-lab-smoke uname \$?\"; $SMOKE_DTRACE_CMD 2>&1; echo \"helios-lab-smoke dtrace \$?\""
+# pfexec and dtrace run under a 30 s watchdog that kills the remote shell's
+# process group (lib/remote.sh SMOKE_WATCHDOG)
+readonly SMOKE_WATCHDOG_CMD="( sleep 30 >/dev/null 2>&1; echo \"helios-lab-smoke timeout\" >&2; kill -9 -\$\$ 2>/dev/null || kill -9 \$\$ ) & w=\$!"
+readonly SMOKE_CMD="uname -o 2>&1; echo \"helios-lab-smoke uname \$?\"; $SMOKE_WATCHDOG_CMD; $SMOKE_DTRACE_CMD 2>&1; echo \"helios-lab-smoke dtrace \$?\"; kill \$w 2>/dev/null || :"
 readonly ONE_LINER="pfexec dtrace -n 'syscall:::entry { @[execname] = count(); }'"
 readonly RFD26_TEXT='meanwhile, read RFD 26: https://rfd.shared.oxide.computer/rfd/0026'
 readonly NET_DOWN='ssh: connect to host 203.0.113.10 port 22: Operation timed out'
@@ -210,6 +213,75 @@ test_the_smoke_reply_is_read_back_check_by_check() {
   if smoke_part "$(smoke_reply illumos 0)" dtrace >/dev/null; then fail 'found a dtrace part without its marker'; fi
 }
 
+# A hung pfexec or dtrace: the watchdog ends the run with its mark on stderr
+# (ssh then exits 255: the shell died by a signal), or ssh passes the
+# shell's 128+N on. Either way the run said nothing, so up waits and retries.
+test_a_smoke_run_cut_short_before_its_markers_is_a_wait_and_is_retried() {
+  local spec rc said
+  for spec in '137|' '255|helios-lab-smoke timeout'; do
+    IFS='|' read -r rc said <<< "$spec"
+    new_sandbox
+    world_running
+    ssh_reply_error ssh-guest-uname.1 "$rc" "$said"
+    run_cli up
+    assert_rc 0
+    assert_eq 2 "$(ssh_count "guest $SMOKE_CMD")" "exit $rc: retried once, then passed"
+    assert_contains "$(steady <<< "$OUT")" "first boot · Ns · the smoke check was cut short on the guest (exit $rc): pfexec and dtrace get 30s"
+    assert_eq 1 "$(ssh_count guest-verified)" 'marked only after the run that passed'
+    assert_eq 'next: helios-lab ssh' "$(tail -1 <<< "$OUT")"
+  done
+}
+
+test_smoke_cut_short_table() {
+  load_cli
+  local spec rc said want got
+  for spec in '0||no' '1||no' '127||no' '137||yes' '143||yes' '254||yes' '255||no' \
+              '255|Connection closed by UNKNOWN port 65535|no' '255|helios-lab-smoke timeout|yes' \
+              '0|helios-lab-smoke timeout|no'; do
+    IFS='|' read -r rc said want <<< "$spec"
+    if smoke_cut_short "$rc" "$said"; then got=yes; else got=no; fi
+    assert_eq "$want" "$got" "smoke_cut_short $rc '$said'"
+  done
+}
+
+# smoke_locally <seconds the fake pfexec hangs> — the real SMOKE_COMMAND, its
+# watchdog cut to 3 s, run by /bin/sh as its own process group's leader (as
+# sshd's setsid makes the guest's shell) with fakes for uname and pfexec.
+# Its stdout goes through a pipe that, like ssh's channel, ends only once
+# every process holding it is gone. Sets SMOKE_OUT, SMOKE_ERR, SMOKE_RC and
+# SMOKE_TOOK (whole seconds).
+smoke_locally() {
+  local bin=$SANDBOX/guest-bin started cmd
+  cmd=${SMOKE_COMMAND/"( sleep $SMOKE_TIMEOUT_S"/( sleep 3}
+  [[ $cmd != "$SMOKE_COMMAND" ]] || fail 'the watchdog sleep is not in the smoke command'
+  mkdir -p "$bin"
+  printf '#!/bin/sh\necho illumos\n' > "$bin/uname"
+  printf '#!/bin/sh\nexec /bin/sleep %s\n' "$1" > "$bin/pfexec"
+  chmod +x "$bin/uname" "$bin/pfexec"
+  echo 0 > "$SANDBOX/smoke.rc"
+  started=$(date +%s)
+  SMOKE_OUT=$( { set -m; PATH=$bin:/usr/bin:/bin /bin/sh -c "$cmd" 2> "$SANDBOX/smoke.err" < /dev/null &
+                 wait $! || echo "$?" > "$SANDBOX/smoke.rc"; } 2>/dev/null | cat )
+  SMOKE_TOOK=$(( $(date +%s) - started ))
+  SMOKE_ERR=$(<"$SANDBOX/smoke.err")
+  SMOKE_RC=$(<"$SANDBOX/smoke.rc")
+}
+
+test_the_smoke_watchdog_ends_a_hung_dtrace_and_never_delays_a_passing_one() {
+  load_cli
+  smoke_locally 30   # far past the 3 s watchdog
+  (( SMOKE_TOOK >= 2 && SMOKE_TOOK <= 10 )) || fail "a hung run took ${SMOKE_TOOK}s, not about 3"
+  assert_eq $'illumos\nhelios-lab-smoke uname 0' "$SMOKE_OUT" 'uname answered; dtrace never did'
+  assert_eq 'helios-lab-smoke timeout' "$SMOKE_ERR"
+  assert_eq 137 "$SMOKE_RC" 'SIGKILL'
+  smoke_cut_short "$SMOKE_RC" "$SMOKE_ERR" || fail 'a run the watchdog ended is not read as cut short'
+  smoke_locally 0
+  (( SMOKE_TOOK <= 2 )) || fail "a passing run took ${SMOKE_TOOK}s: something waited on the watchdog"
+  assert_eq $'illumos\nhelios-lab-smoke uname 0\nhelios-lab-smoke dtrace 0' "$SMOKE_OUT"
+  assert_eq '' "$SMOKE_ERR"
+  assert_eq 0 "$SMOKE_RC"
+}
+
 # --- Mac: the guest key ------------------------------------------------------
 test_an_unverified_guests_old_pin_is_dropped_before_the_first_smoke_poll() {
   world_running
@@ -250,7 +322,7 @@ test_a_first_boot_that_never_answers_times_out_abandons_it_and_says_up_recreates
   ssh_reply ssh-host-guest-abandon < /dev/null
   run_cli up
   assert_rc 1
-  assert_eq 180 "$(ssh_count "host sudo $HELPER_PATH status")" 'polls: the long budget'
+  assert_eq $(( 1 + 180 )) "$(ssh_count "host sudo $HELPER_PATH status")" 'the look before provisioning, then polls: the long budget'
   assert_eq 0 "$(ssh_count "$(cfg) guest ")" 'a guest the host never sees on tcp/22 is never tried'
   assert_eq 1 "$(ssh_count "host sudo $HELPER_PATH guest-abandon")"
   assert_eq 0 "$(ssh_count guest-verified)"
@@ -266,7 +338,7 @@ test_a_verified_guest_that_never_answers_times_out_at_the_short_budget_and_is_ke
   guest_status_reply verified-booting | ssh_reply ssh-host-status
   run_cli up
   assert_rc 1
-  assert_eq 30 "$(ssh_count "host sudo $HELPER_PATH status")" 'polls: the restart budget'
+  assert_eq $(( 1 + 30 )) "$(ssh_count "host sudo $HELPER_PATH status")" 'the look before provisioning, then polls: the restart budget'
   assert_eq 0 "$(ssh_count guest-abandon)" 'a verified guest is never abandoned'
   assert_contains "$ERR" 'the verified guest did not pass the smoke check within'
   assert_contains "$ERR" 'last seen: domain running, no DHCP lease yet'
@@ -276,14 +348,15 @@ test_a_verified_guest_that_never_answers_times_out_at_the_short_budget_and_is_ke
 
 test_while_waiting_up_shows_each_new_console_line_once() {
   world_running
-  guest_status_reply booting | ssh_reply_seq ssh-host-status 1
-  guest_status_reply booting | sed 's/^console .*/console helios console login:/' | ssh_reply_seq ssh-host-status 2
+  # call 1 is up's look before provisioning (the default reply)
+  guest_status_reply booting | ssh_reply_seq ssh-host-status 2
   guest_status_reply booting | sed 's/^console .*/console helios console login:/' | ssh_reply_seq ssh-host-status 3
+  guest_status_reply booting | sed 's/^console .*/console helios console login:/' | ssh_reply_seq ssh-host-status 4
   run_cli up
   assert_rc 0
   assert_eq 'first boot · Ns · Loading smf(7) service descriptions: 112/112
 first boot · Ns · helios console login:' "$(grep '^first boot · [0-9]' <<< "$OUT" | steady)"
-  assert_eq 4 "$(ssh_count "host sudo $HELPER_PATH status")" 'three waits, then the default (ready) reply'
+  assert_eq 6 "$(ssh_count "host sudo $HELPER_PATH status")" "the look, three waits, the default (ready) reply, then the ready screen's"
 }
 
 test_a_guest_that_refuses_the_key_while_booting_is_retried_until_it_lets_us_in() {
@@ -341,7 +414,8 @@ test_a_host_found_stopped_during_the_guest_poll_is_started_again() {
   tagged < "$STOPPED_IDLE" | reply_seq ec2-describe-instances 2
   reply ec2-start-instances "$STARTING"
   local n
-  for n in 1 2 3; do ssh_reply_error "ssh-host-status.$n" 255 'Connection closed by 203.0.113.10 port 22'; done
+  # call 1 is up's look before provisioning; the guest poll's go
+  for n in 2 3 4; do ssh_reply_error "ssh-host-status.$n" 255 'Connection closed by 203.0.113.10 port 22'; done
   run_cli up
   assert_rc 0
   assert_contains "$OUT" "host $LAB_ID stopped itself (idle) while up was connecting · up follows it"
@@ -655,16 +729,76 @@ test_status_never_probes_a_running_host_without_a_public_ip() {
   [[ ! -e $(cfg) ]] || fail 'status rendered a fragment without an IP'
 }
 
-test_status_says_guest_intact_for_a_stopped_host_whose_guest_this_mac_reached() {
+test_status_says_guest_intact_for_a_stopped_host_whose_guest_this_mac_saw_verified() {
   reply ec2-describe-instances "$STOPPED_IDLE"
   run_status
   assert_line 1 "stopped by idle timer · ≈\$0.32/day"
+  # A guest this Mac reached but never saw verified (an interrupted first
+  # boot, a failed smoke check, then `helios-lab ssh guest`): its pin alone
+  # says nothing, as the next up recreates that guest.
   again
   pinned_guest
+  run_status
+  assert_line 1 "stopped by idle timer · ≈\$0.32/day"
+  again
+  : > "$HELIOS_LAB_STATE_DIR/$LAB_ID.guest-verified"
   run_status
   assert_rc 0
   assert_line 1 "stopped by idle timer · guest intact · ≈\$0.32/day"
   assert_eq '' "$(ssh_calls)" 'a stopped host is not probed'
+  [[ -e $HELIOS_LAB_STATE_DIR/$LAB_ID.guest-verified ]] || fail 'status changed the record'
+}
+
+# up keeps this Mac's record of a verified guest in step with the host's
+# marker: written once guest-verified succeeded (or the host says so),
+# dropped while the host says not
+test_up_records_a_verified_guest_on_this_mac_and_drops_the_record_when_the_host_has_none() {
+  local seen=$HELIOS_LAB_STATE_DIR/$LAB_ID.guest-verified
+  world_running
+  run_cli up
+  assert_rc 0
+  [[ -e $seen ]] || fail 'no record after guest-verified'
+  # The host has no marker (removed by hand to rebuild), and the guest's
+  # smoke check fails this time: the record is gone before the wait.
+  again
+  rm -rf "$STUB_SSH_DIR"/{.calls,.stdin}
+  smoke_reply illumos 0 'dtrace: failed to initialize dtrace' 1 | ssh_reply ssh-guest-uname
+  run_cli up
+  assert_rc 1
+  [[ ! -e $seen ]] || fail 'the record outlived the host marker it stood for'
+  # A verified guest that fails its smoke check is still verified on the host.
+  again
+  rm -rf "$STUB_SSH_DIR"/{.calls,.stdin}
+  guest_status_reply verified | ssh_reply ssh-host-status
+  ssh_reply_error ssh-guest-uname 1 'uname: illegal option'
+  run_cli up
+  assert_rc 1
+  [[ -e $seen ]] || fail 'no record while the host says verified'
+}
+
+# The guest stage recreates an unverified guest that no create unit runs
+# for (engvm destroy.sh, then create.sh): up says so before provisioning.
+test_up_warns_before_provisioning_when_it_will_recreate_an_unverified_guest() {
+  world_running
+  pinned_guest   # reached once, over helios-lab ssh guest
+  guest_status_reply shut-off | ssh_reply_seq ssh-host-status 1
+  run_cli up
+  assert_rc 0
+  assert_eq 1 "$(grep -c 'never passed the smoke check' <<< "$ERR")" "$ERR"
+  assert_contains "$ERR" 'helios-lab: the guest (helios, shut off) never passed the smoke check, so this up recreates it: its disk, and anything done in it, is lost'
+  assert_log_order "host sudo $HELPER_PATH status" 'host sudo systemctl start'   # said before the run starts
+}
+
+test_guest_recreate_note_names_only_a_guest_the_run_recreates() {
+  load_cli
+  local kind
+  assert_contains "$(guest_recreate_note "$(guest_status_reply shut-off)")" 'never passed the smoke check'
+  assert_contains "$(guest_recreate_note "$(guest_status_reply first-boot | sed 's/^create active$/create inactive/')")" \
+    '(helios, running)' 'an abandoned first boot'
+  for kind in first-boot booting verified verified-booting other-sizing not-built; do
+    assert_eq '' "$(guest_recreate_note "$(guest_status_reply "$kind")")" "$kind"
+  done
+  assert_eq '' "$(guest_recreate_note "$(guest_status_reply shut-off | sed 's/^domain .*/domain unknown/')")" 'libvirt cannot say'
 }
 
 test_guest_fields_and_details_for_each_kind_of_reply() {
@@ -736,7 +870,7 @@ test_a_seed_download_timeout_fails_up_naming_the_seed_stage() {
   assert_contains "$OUT" "seed · failed · 20m00s · $SEED_TIMEOUT_REASON"
   assert_above "$RFD26_TEXT" 'seed · failed'
   assert_eq 0 "$(ssh_count "$(cfg) guest ")" 'no smoke check after a failed provision'
-  assert_eq 0 "$(ssh_count "helios-lab-host status")"
+  assert_eq 1 "$(ssh_count "helios-lab-host status")" 'only the look before provisioning'
 }
 
 test_the_ready_screen() {
@@ -746,10 +880,12 @@ test_the_ready_screen() {
   assert_eq "guest ready in 9m48s · illumos · dtrace ok
   in the guest, try: $ONE_LINER  (Ctrl-C prints system calls by process)
   auto-stops after 60 min idle · helios-lab keep 3h to hold it · helios-lab stop when done
-next: helios-lab ssh" "$(ready_screen 588 60 none)"
+next: helios-lab ssh" "$(ready_screen 588 60 none "$(autostop_field 60)")"
   assert_eq '  auto-stop inhibited until 13:50, then it stops after 90 min idle · helios-lab keep off clears it · helios-lab stop when done' \
-    "$(ready_screen 588 90 1792849839 | sed -n 3p)" 'a keep in force'
-  assert_eq 'guest ready · illumos · dtrace ok' "$(ready_screen '' 60 none | head -1)" 'no elapsed outside up'
+    "$(ready_screen 588 90 1792849839 'auto-stop inhibited until 13:50' | sed -n 3p)" 'a keep in force'
+  assert_eq '  auto-stops in ~5 min · helios-lab keep 3h to hold it · helios-lab stop when done' \
+    "$(ready_screen 588 60 none 'auto-stops in ~5 min' | sed -n 3p)" "the host's own countdown"
+  assert_eq 'guest ready · illumos · dtrace ok' "$(ready_screen '' 60 none "$(autostop_field 60)" | head -1)" 'no elapsed outside up'
 }
 
 # --- Mac and host agree ------------------------------------------------------

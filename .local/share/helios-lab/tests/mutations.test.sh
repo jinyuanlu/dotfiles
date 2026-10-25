@@ -409,6 +409,51 @@ test_capacity_error_on_create_names_the_type_and_override_with_one_launch() {
   assert_no_lock
 }
 
+# Hand-written: the CLI's own read timeout (no capture), exit 255, as botocore
+# words it once EC2 accepted the connection but never answered.
+readonly READ_TIMEOUT=$'\nRead timeout on endpoint URL: "https://ec2.ap-northeast-1.amazonaws.com/"'
+readonly IN_FLIGHT='a launch or start was in flight: helios-lab status shows whether the host is up'
+vcpu_limit_error() {
+  aws_error VcpuLimitExceeded "$1" 'You have requested more vCPU capacity than your current vCPU limit of 0 allows for the instance bucket that the specified instance type belongs to.'
+}
+
+# fails_as_itself <call> <n> <its exit> <its stderr> <rc> <said> <in flight: yes|no>
+# — the nth call to <call> fails so, and up exits <rc> reporting it once as
+# <said>: a launch or start that failed for another reason than capacity
+# keeps its own typed report and is never read as "no capacity"
+fails_as_itself() {
+  rm -rf "$STUB_AWS_DIR/.calls"; : > "$STUB_LOG"
+  reply_error_seq "$1" "$2" "$3" "$4"
+  run_cli up
+  assert_rc "$5"
+  assert_eq 1 "$(grep -cF -- "$6" <<< "$ERR")" "the failure, reported once: $6"
+  assert_not_contains "$ERR" 'EC2 has no'
+  assert_not_contains "$ERR" 'nothing was launched'
+  assert_not_contains "$ERR" 'stopped and intact'
+  if [[ $7 == yes ]]; then assert_contains "$ERR" "$IN_FLIGHT"; else assert_not_contains "$ERR" 'in flight'; fi
+  assert_no_lock
+}
+
+# A read timeout: EC2 may have acted on the call, so the outcome is unknown
+# and the in-flight notice says how to find out. A service refusal did nothing.
+test_a_launch_failing_for_another_reason_than_capacity_keeps_its_typed_code() {
+  world_absent
+  fails_as_itself ec2-run-instances 2 255 "$READ_TIMEOUT" 8 'cannot reach AWS (ec2 run-instances)' yes
+  assert_eq 1 "$(launch_call | grep -c .)" 'a single launch attempt'
+  fails_as_itself ec2-run-instances 2 254 "$(vcpu_limit_error RunInstances)" 1 'ec2 run-instances failed' no
+  fails_as_itself ec2-run-instances 2 254 "$(unauthorized_error)" 3 "profile 'helios-lab' may not call ec2 run-instances" no
+}
+
+test_a_start_failing_for_another_reason_than_capacity_keeps_its_typed_code() {
+  world_existing "$STOPPED_IDLE"
+  fails_as_itself ec2-start-instances 1 255 "$READ_TIMEOUT" 8 'cannot reach AWS (ec2 start-instances)' yes
+  assert_eq 1 "$(count_of start-instances)" 'one start attempt'
+  fails_as_itself ec2-start-instances 1 254 "$(vcpu_limit_error StartInstances)" 1 'ec2 start-instances failed' no
+  fails_as_itself ec2-start-instances 1 254 \
+    "$(aws_error UnauthorizedOperation StartInstances 'You are not authorized to perform this operation.')" \
+    3 "profile 'helios-lab' may not call ec2 start-instances" no
+}
+
 test_a_type_too_small_for_the_guest_is_a_usage_error_at_create() {
   world_absent
   export HELIOS_LAB_INSTANCE_TYPE=m8i.large
