@@ -14,13 +14,18 @@
  *
  * NOTE: secretScanFile() currently shells out to `gitleaks` from PATH; the vendored
  * binary install is part of Lane E (setup-gbrain). When gitleaks is missing, the
- * helper warns once and returns an empty findings list — fail-safe defaults.
+ * helper warns once and returns an empty findings list with scanner="missing".
+ * An empty list means "clean" only when scanner === "gitleaks" — callers that
+ * gate writes on a scan must treat "missing" and "error" as unscanned.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, appendFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, statSync } from "fs";
+import { appendJsonl } from "./jsonl-store";
+import { gbrainConfigDir, isExecTimeout } from "./gbrain-exec";
 import { dirname, join } from "path";
 import { execFileSync } from "child_process";
-import { homedir } from "os";
+import { tmpdir } from "os";
+import { resolveStateRoot } from "./state-root";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -106,9 +111,15 @@ export function canonicalizeRemote(url: string | null | undefined): string {
     // strip user@ prefix on URL-style remotes
     s = s.replace(/^[^@\/]+@/, "");
   }
+  // strip trailing slash(es) first, so a URL written with a trailing slash
+  // still matches the `.git$` suffix below (e.g. ".../repo.git/" must
+  // canonicalize to ".../repo", not ".../repo.git").
+  s = s.replace(/\/+$/, "");
   // strip trailing .git
   s = s.replace(/\.git$/i, "");
-  // strip trailing slash
+  // re-strip trailing slash(es): a path remote ending in a `.git` directory
+  // component ("/repo/.git") exposes a new trailing slash once `.git` is
+  // stripped, which would split the repo into a second identity.
   s = s.replace(/\/+$/, "");
   // collapse multiple slashes (after path normalization)
   s = s.replace(/\/{2,}/g, "/");
@@ -118,25 +129,111 @@ export function canonicalizeRemote(url: string | null | undefined): string {
 // ── Public: secretScanFile (gitleaks wrapper) ─────────────────────────────
 
 let _gitleaksAvailability: boolean | null = null;
+// Two flags, not one: "slow" and "absent" are different messages with
+// different remediations, and a slow warning early in a run must not
+// suppress the permanent "not in PATH; scanning disabled" warning later.
+let _gitleaksSlowWarned = false;
+let _gitleaksAbsentWarned = false;
+// Per-run cooldown: retrying a slow probe on EVERY file re-pays up to
+// probe+retry (12s default) per file — an 887-file ingest on a loaded box
+// spent hours asking the same slow question. After this many consecutive
+// slow answers the run stops probing; the availability cache is still never
+// written (slow != absent — the next PROCESS probes fresh).
+const GITLEAKS_SLOW_PROBE_LIMIT = 3;
+let _gitleaksConsecutiveSlow = 0;
+let _gitleaksCooldownWarned = false;
 
-function gitleaksAvailable(): boolean {
-  if (_gitleaksAvailability !== null) return _gitleaksAvailability;
+// Probe budgets. The first is short because the common answers (a real
+// gitleaks, or ENOENT) are both immediate; the second is generous because by
+// then we know the box is busy, not that the binary is absent.
+const GITLEAKS_PROBE_MS = 2_000;
+const GITLEAKS_RETRY_MS = 10_000;
+let _probeMs = GITLEAKS_PROBE_MS;
+let _retryMs = GITLEAKS_RETRY_MS;
+
+/**
+ * Probe outcome. "slow" is the load case: the binary may well be installed,
+ * the machine just did not get around to answering. It is deliberately NOT
+ * folded into "absent" — see gitleaksAvailable().
+ */
+type GitleaksProbe = "ok" | "absent" | "slow";
+
+function probeGitleaks(timeoutMs: number): GitleaksProbe {
   try {
     execFileSync("gitleaks", ["version"], {
       env: process.env,
       stdio: "ignore",
-      timeout: 2_000,
+      timeout: timeoutMs,
     });
+    return "ok";
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e?.code === "ENOENT") return "absent";
+    if (isExecTimeout(err)) return "slow";
+    // Present but unusable (non-zero exit, EACCES). Practically the same as
+    // absent, and equally permanent for this process.
+    return "absent";
+  }
+}
+
+/**
+ * Is gitleaks usable? Answers are cached for the process — EXCEPT a timeout.
+ *
+ * Caching a timeout was a fail-open bug: one busy moment (observed under the
+ * 7-way sharded test runner, where spawning a shell script took over 2s) set
+ * availability to false for the whole run, and every later file was ingested
+ * unscanned behind a single stderr line. A missing binary is a fact and stays
+ * cached; a slow answer is a condition and gets retried on the next file.
+ */
+function gitleaksAvailable(): boolean {
+  if (_gitleaksAvailability !== null) return _gitleaksAvailability;
+  if (_gitleaksConsecutiveSlow >= GITLEAKS_SLOW_PROBE_LIMIT) {
+    if (!_gitleaksCooldownWarned) {
+      _gitleaksCooldownWarned = true;
+      process.stderr.write(
+        "[gstack-memory-helpers] gitleaks did not answer in " +
+        `${GITLEAKS_SLOW_PROBE_LIMIT} consecutive probes; skipping the probe ` +
+        "for the rest of this run — remaining files cannot be scanned. Re-run " +
+        "when the machine is less loaded to scan them.\n"
+      );
+    }
+    return false;
+  }
+
+  let probe = probeGitleaks(_probeMs);
+  if (probe === "slow") probe = probeGitleaks(_retryMs);
+
+  if (probe === "ok") {
     _gitleaksAvailability = true;
-  } catch {
-    _gitleaksAvailability = false;
-    // Only warn once per process — Lane E will vendor the binary.
+    _gitleaksConsecutiveSlow = 0;
+    return true;
+  }
+
+  if (probe === "slow") {
+    // No cache write: leave the question open for the next call — but count
+    // it, so a persistently loaded box stops paying probe+retry per file.
+    _gitleaksConsecutiveSlow++;
+    if (!_gitleaksSlowWarned) {
+      _gitleaksSlowWarned = true;
+      process.stderr.write(
+        "[gstack-memory-helpers] gitleaks did not answer in " +
+        `${Math.round((_probeMs + _retryMs) / 1000)}s (machine under load); ` +
+        "this file could not be scanned and the probe retries on the next one.\n"
+      );
+    }
+    return false;
+  }
+
+  _gitleaksAvailability = false;
+  // Only warn once per process — Lane E will vendor the binary.
+  if (!_gitleaksAbsentWarned) {
+    _gitleaksAbsentWarned = true;
     process.stderr.write(
-      "[gstack-memory-helpers] gitleaks not in PATH; secret scanning disabled. " +
+      "[gstack-memory-helpers] gitleaks not in PATH; files cannot be secret-scanned. " +
       "Run /setup-gbrain to install (or `brew install gitleaks`).\n"
     );
   }
-  return _gitleaksAvailability;
+  return false;
 }
 
 /**
@@ -155,27 +252,33 @@ export function secretScanFile(path: string): SecretScanResult {
   if (!gitleaksAvailable()) {
     return { scanned: false, findings: [], scanner: "missing" };
   }
+  let dir: string | undefined;
   try {
-    // gitleaks detect --no-git --source <path> --report-format json --report-path -
-    // Returns 0 on clean, 1 on findings, 126/127 on bad invocation.
-    const out = execFileSync(
+    dir = mkdtempSync(join(tmpdir(), "gstack-secret-report-"));
+    const report = join(dir, "report.json");
+    writeFileSync(report, "", { mode: 0o600, flag: "wx" });
+    const maxReportBytes = 16 * 1024 * 1024;
+    execFileSync(
       "gitleaks",
-      ["detect", "--no-git", "--source", path, "--report-format", "json", "--report-path", "/dev/stdout", "--exit-code", "0"],
-      { encoding: "utf-8", env: process.env, maxBuffer: 16 * 1024 * 1024 }
+      ["detect", "--no-git", "--source", path, "--report-format", "json", "--report-path", report, "--exit-code", "0"],
+      { env: process.env, stdio: "ignore", timeout: 60_000, killSignal: "SIGKILL" }
     );
-    const trimmed = out.trim();
-    if (!trimmed) return { scanned: true, findings: [], scanner: "gitleaks" };
-    const parsed = JSON.parse(trimmed) as Array<{
-      RuleID: string;
-      Description: string;
-      StartLine: number;
-      Match?: string;
-      Secret?: string;
-    }>;
-    const findings: SecretFinding[] = (parsed || []).map((f) => ({
-      rule_id: f.RuleID || "unknown",
-      description: f.Description || "",
-      line: f.StartLine || 0,
+    if (statSync(report).size > maxReportBytes) {
+      return { scanned: false, findings: [], scanner: "error" };
+    }
+    const parsed = JSON.parse(readFileSync(report, "utf-8"));
+    if (!Array.isArray(parsed) || !parsed.every((f) =>
+      f && typeof f.RuleID === "string" && f.RuleID.length > 0 &&
+      typeof f.Description === "string" && Number.isInteger(f.StartLine) && f.StartLine > 0 &&
+      (f.Secret === undefined || typeof f.Secret === "string") &&
+      (f.Match === undefined || typeof f.Match === "string")
+    )) {
+      return { scanned: false, findings: [], scanner: "error" };
+    }
+    const findings: SecretFinding[] = parsed.map((f) => ({
+      rule_id: f.RuleID,
+      description: f.Description,
+      line: f.StartLine,
       redacted_match: redactMatch(f.Secret || f.Match || ""),
     }));
     return { scanned: true, findings, scanner: "gitleaks" };
@@ -185,6 +288,31 @@ export function secretScanFile(path: string): SecretScanResult {
       findings: [],
       scanner: "error",
     };
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Scan in-memory text — e.g. a rendered page body — by writing it to a
+ * private temp file and running secretScanFile() on it. Scan the exact bytes
+ * you are about to write, not the file they were rendered from: gitleaks'
+ * assignment rules don't match across a JSON-escaped quote, so a .jsonl
+ * transcript line holding `KEY=\"value\"` scans clean while the rendered
+ * page's `KEY="value"` is a finding. A temp file that can't be written
+ * returns scanner="error", never an empty "clean" result.
+ */
+export function secretScanText(text: string): SecretScanResult {
+  let dir: string | undefined;
+  try {
+    dir = mkdtempSync(join(tmpdir(), "gstack-secret-scan-"));
+    const file = join(dir, "page.md");
+    writeFileSync(file, text, { encoding: "utf-8", mode: 0o600 });
+    return secretScanFile(file);
+  } catch {
+    return { scanned: false, findings: [], scanner: "error" };
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -199,7 +327,7 @@ function redactMatch(s: string): string {
 const ENGINE_CACHE_TTL_MS = 60 * 1000;
 
 function gstackHome(): string {
-  return process.env.GSTACK_HOME || join(homedir(), ".gstack");
+  return resolveStateRoot();
 }
 
 function engineCachePath(): string {
@@ -249,12 +377,13 @@ export function detectEngineTier(): EngineDetect {
 }
 
 // Returns gbrain's config.json path, honoring GBRAIN_HOME env var with a
-// fallback to ~/.gbrain. gbrain >=0.25 dropped the top-level `engine` field
+// fallback to ~/.gbrain. Resolution matches gbrain's own configDir()
+// contract (#2521): GBRAIN_HOME is a parent dir, `.gbrain` is appended.
+// gbrain >=0.25 dropped the top-level `engine` field
 // from doctor output, so this file is the only reliable source for engine
 // detection on that version. See #1415.
 function gbrainConfigPath(): string {
-  const root = process.env.GBRAIN_HOME || join(homedir(), ".gbrain");
-  return join(root, "config.json");
+  return join(gbrainConfigDir(process.env), "config.json");
 }
 
 // Best-effort JSONL append to ~/.gstack/.gbrain-errors.jsonl. Never throws.
@@ -262,11 +391,7 @@ function logGbrainError(kind: string, detail: string): void {
   try {
     const path = errorLogPath();
     mkdirSync(dirname(path), { recursive: true });
-    appendFileSync(
-      path,
-      JSON.stringify({ ts: new Date().toISOString(), kind, detail: detail.slice(0, 500) }) + "\n",
-      "utf-8"
-    );
+    appendJsonl(path, { ts: new Date().toISOString(), kind, detail: detail.slice(0, 500) });
   } catch { /* logging is best-effort */ }
 }
 
@@ -396,6 +521,7 @@ function extractGbrainBlock(frontmatter: string): GbrainManifest | null {
       const globM = body.match(/(?:^|\n)\s*glob\s*:\s*"?([^"\n]+?)"?\s*$/m);
       const sortM = body.match(/(?:^|\n)\s*sort\s*:\s*([^\n]+)/);
       const tailM = body.match(/(?:^|\n)\s*tail\s*:\s*(\d+)/);
+      const filterMap = parseFilterMap(body);
 
       if (idM) q.id = idM[1].trim();
       if (kindM) {
@@ -408,6 +534,7 @@ function extractGbrainBlock(frontmatter: string): GbrainManifest | null {
       if (globM) q.glob = globM[1].trim();
       if (sortM) q.sort = sortM[1].trim();
       if (tailM) q.tail = parseInt(tailM[1], 10);
+      if (filterMap) q.filter = filterMap;
 
       if (q.id && q.kind && q.render_as) {
         queries.push(q as GbrainManifestQuery);
@@ -416,6 +543,39 @@ function extractGbrainBlock(frontmatter: string): GbrainManifest | null {
   }
 
   return { schema, context_queries: queries };
+}
+
+/**
+ * Parse a nested `filter:` block map out of a single context_queries item body.
+ *
+ * The block is a YAML map nested under the `filter:` key:
+ *
+ *   filter:
+ *     type: timeline
+ *     tags_contains: "repo:{repo_slug}"
+ *
+ * Each sub-key sits one indent level deeper than `filter:`. Surrounding quotes
+ * are stripped and template vars ({repo_slug}, now-7d, ...) are left intact for
+ * downstream substitution; dispatchList maps each key onto a `gbrain list`
+ * flag. Returns undefined when there is no `filter:`
+ * block or it is empty.
+ */
+function parseFilterMap(body: string): Record<string, string> | undefined {
+  const lines = body.split("\n");
+  const filterIdx = lines.findIndex((l) => /^\s*filter\s*:\s*$/.test(l));
+  if (filterIdx === -1) return undefined;
+  const filterIndent = lines[filterIdx].match(/^\s*/)![0].length;
+
+  const filter: Record<string, string> = {};
+  for (let i = filterIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === "") continue; // tolerate blank lines within the block
+    const indent = line.match(/^\s*/)![0].length;
+    if (indent <= filterIndent) break; // dedent to a sibling key ends the block
+    const kv = line.match(/^\s*([A-Za-z0-9_]+)\s*:\s*"?(.*?)"?\s*$/);
+    if (kv) filter[kv[1]] = kv[2].trim();
+  }
+  return Object.keys(filter).length > 0 ? filter : undefined;
 }
 
 // ── Public: withErrorContext ──────────────────────────────────────────────
@@ -464,7 +624,7 @@ function logErrorContext(entry: ErrorContextEntry): void {
   try {
     const path = errorLogPath();
     mkdirSync(dirname(path), { recursive: true });
-    appendFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
+    appendJsonl(path, entry);
   } catch {
     // Logging failure is non-fatal — never block the op.
   }
@@ -473,4 +633,23 @@ function logErrorContext(entry: ErrorContextEntry): void {
 // Test-only export for resetting the gitleaks availability cache between tests.
 export function _resetGitleaksAvailabilityCache(): void {
   _gitleaksAvailability = null;
+  _gitleaksSlowWarned = false;
+  _gitleaksAbsentWarned = false;
+  _gitleaksConsecutiveSlow = 0;
+  _gitleaksCooldownWarned = false;
+  _probeMs = GITLEAKS_PROBE_MS;
+  _retryMs = GITLEAKS_RETRY_MS;
+}
+
+// Test-only: shrink the probe budgets so the slow path can be exercised
+// without a multi-second sleep in the suite. Reset restores the defaults.
+export function _setGitleaksProbeTimeouts(first: number, second: number): void {
+  _probeMs = first;
+  _retryMs = second;
+}
+
+// Test-only: read the cache without triggering a probe. `null` means the
+// question is still open — which is the whole point of the timeout path.
+export function _gitleaksCacheState(): boolean | null {
+  return _gitleaksAvailability;
 }

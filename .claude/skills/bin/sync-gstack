@@ -18,27 +18,23 @@ SYNC_SKILLS=(
   codex
   design-consultation
   design-review
-  document-release
   freeze
   guard
-  investigate
   office-hours
   plan-ceo-review
   plan-design-review
-  plan-eng-review
   qa
   qa-only
   retro
-  review
   setup-browser-cookies
   setup-gbrain
-  ship
   sync-gbrain
   unfreeze
 )
 
 # Top-level gstack bin scripts (live in gstack/bin/, not in any skill dir)
-# that the gbrain skills shell out to. Synced into dotfiles skills/bin/
+# that synced skills shell out to (gbrain, and `paths` for every skill's
+# state root). Synced into dotfiles skills/bin/
 # with the `gstack-` filename prefix stripped, matching the existing
 # rewrite convention (e.g. `skills/bin/config` for `gstack-config`).
 SYNC_TOP_BINS=(
@@ -54,6 +50,7 @@ SYNC_TOP_BINS=(
   gstack-memory-ingest.ts
   gstack-brain-sync
   gstack-brain-enqueue
+  gstack-paths
 )
 
 # Top-level gstack lib files imported by the SYNC_TOP_BINS TypeScript
@@ -65,6 +62,10 @@ SYNC_TOP_LIB=(
 
 # Skills deliberately excluded:
 #   gstack-upgrade — gstack self-updater; sync-gstack is our upgrade mechanism
+#   review, ship, document-release, plan-eng-review — compound-engineering
+#     covers these (ce-code-review, ce-commit-push-pr, ce-plan/ce-doc-review),
+#     and gstack's versions need its runtime bins to work fully
+#   investigate — retired upstream in v1.97 (use ce-debug / falsify)
 
 usage() {
   echo "Usage: sync-gstack [--dry-run] [--ref <branch|tag>]"
@@ -275,6 +276,11 @@ for src_rel in "${SYNC_TOP_LIB[@]}"; do
   dst_base="${base#gstack-}"
   sync_top_file "$src_rel" "lib/$dst_base" no
 done
+
+# State-root twin sourced by careful/freeze hooks via a relative
+# `../../bin/gstack-state-root.sh` the rewrites can't reach, so it keeps its
+# upstream name. Without it /freeze fails closed and /careful asks.
+sync_top_file bin/gstack-state-root.sh bin/gstack-state-root.sh no
 
 # --- Stale skill cleanup ---
 # Detect gstack-sourced skill dirs that are no longer in SYNC_SKILLS
