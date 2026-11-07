@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# gstack-paths — output portable state-root paths for skill bash blocks
+# Usage: eval "$(gstack-paths)"  → sets GSTACK_STATE_ROOT, PLAN_ROOT, TMP_ROOT
+# Or:    gstack-paths            → prints GSTACK_STATE_ROOT=... etc.
+#        gstack-paths --explain  → which variable selected the state root, and why
+#        gstack-paths --get NAME → print one raw value (NAME = GSTACK_STATE_ROOT,
+#                                  PLAN_ROOT or TMP_ROOT); exits 1 on failure
+#
+# Resolves three roots with explicit fallback chains so skills work the same
+# whether installed as a Claude Code plugin (CLAUDE_PLUGIN_DATA / CLAUDE_PLANS_DIR
+# set), a global ~/.claude/skills/ install, or a local checkout under
+# CI / container env where HOME may be unset.
+#
+# Chains:
+#   GSTACK_STATE_ROOT: GSTACK_STATE_ROOT -> GSTACK_HOME -> GSTACK_STATE_DIR
+#                      -> CLAUDE_PLUGIN_DATA (only when CLAUDE_PLUGIN_ROOT=*gstack*)
+#                      -> $HOME/.gstack -> .gstack
+#                      (one rule, owned by bin/gstack-state-root.sh; set GSTACK_HOME
+#                      to relocate state; GSTACK_STATE_ROOT is this script's output,
+#                      also honored as input; GSTACK_STATE_DIR is a legacy alias)
+#   PLAN_ROOT:         GSTACK_PLAN_DIR -> CLAUDE_PLANS_DIR -> $HOME/.claude/plans -> .claude/plans
+#   TMP_ROOT:          TMPDIR -> TMP -> .gstack/tmp (and mkdir -p, best-effort)
+# Docs: https://github.com/garrytan/gstack/blob/main/docs/state-root.md
+#
+# Callers guard the eval, because eval "$(f)" succeeds even when f fails:
+#   eval "$(gstack-paths)"; : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+# Skill bash blocks use --get instead (#2763): worktree-isolated Claude Code
+# sessions refuse any eval/source, but run a plain assignment from a literal
+# command, guarded the same way:
+#   GSTACK_STATE_ROOT=$(gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+#
+# Output: values are emitted shell-quoted (printf %q) so `eval` round-trips them
+# byte-for-byte. This matters on Windows, where $TMP is a backslash path like
+# C:\Users\me\AppData\Local\Temp — with a bare `echo`, eval consumes the
+# backslashes as escapes and the caller gets C:UsersmeAppDataLocalTemp. A value
+# containing a space (C:\Program Files\Temp) is worse: eval word-splits it and
+# the variable ends up empty. Quoting here is the only fix that works, because
+# the corruption happens during eval, before the caller has anything to quote.
+# Callers should still quote expansions ("$GSTACK_STATE_ROOT") for the same
+# reason any path variable needs quoting.
+set -u
+
+_GSTACK_DOC="https://github.com/garrytan/gstack/blob/main/docs/state-root.md"
+_GSTACK_TWIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/gstack-state-root.sh"
+
+# Fail stop: never print a payload that would set an empty GSTACK_STATE_ROOT.
+_gstack_paths_fail() {
+  echo "gstack-paths: cannot resolve the gstack state root: $1" >&2
+  echo "fix: reinstall gstack with ./setup (in the gstack checkout) or /gstack-upgrade. Docs: $_GSTACK_DOC" >&2
+  exit 1
+}
+if [ ! -f "$_GSTACK_TWIN" ] || ! . "$_GSTACK_TWIN" 2>/dev/null || ! command -v gstack_state_root_select >/dev/null 2>&1; then
+  _gstack_paths_fail "missing or broken $_GSTACK_TWIN"
+fi
+
+# State root: where gstack writes projects/, sessions/, analytics/.
+gstack_state_root_select
+_state_root="$_gstack_sr_root"
+[ -n "$_state_root" ] || _gstack_paths_fail "the resolver in $_GSTACK_TWIN returned an empty root"
+
+if [ "${1:-}" = "--explain" ]; then
+  echo "state root: $_state_root (selected by $_gstack_sr_var)"
+  echo "chain (first non-empty wins):"
+  _gstack_sel_seen=0
+  for _v in GSTACK_STATE_ROOT GSTACK_HOME GSTACK_STATE_DIR CLAUDE_PLUGIN_DATA; do
+    eval "_val=\${$_v:-}"
+    if [ -z "$_val" ]; then
+      printf '  %-20s unset\n' "$_v"
+    elif [ "$_v" = "$_gstack_sr_var" ]; then
+      printf '  %-20s %s  selected\n' "$_v" "$_val"
+    elif [ "$_v" = CLAUDE_PLUGIN_DATA ] && [ "$_gstack_sr_var" = default ]; then
+      printf '  %-20s %s  ignored (CLAUDE_PLUGIN_ROOT does not contain "gstack")\n' "$_v" "$_val"
+    else
+      printf '  %-20s %s  ignored\n' "$_v" "$_val"
+    fi
+  done
+  _gstack_user_home
+  if [ -n "$_gstack_home_val" ]; then
+    _gstack_default="$_gstack_home_val/.gstack"
+  else
+    _gstack_default=".gstack"
+  fi
+  if [ "$_gstack_sr_var" = default ]; then
+    printf '  %-20s %s  selected\n' "default" "$_gstack_default"
+  else
+    printf '  %-20s %s  ignored\n' "default" "$_gstack_default"
+    _gstack_has_state=no
+    for _e in "$_gstack_default"/* "$_gstack_default"/.[!.]*; do
+      [ -e "$_e" ] && { _gstack_has_state=yes; break; }
+    done
+    echo "default root $_gstack_default also holds gstack state: $_gstack_has_state"
+  fi
+  echo "merged privacy keys (most restrictive value across roots wins):"
+  for _k in telemetry memorable_recall codex_reviews update_check; do
+    gstack_config_select "$_k"
+    if [ -n "$_gstack_cfg_value" ]; then
+      printf '  %-17s %s (from %s/config.yaml)\n' "$_k:" "$_gstack_cfg_value" "$_gstack_cfg_root"
+    else
+      printf '  %-17s not set (default applies)\n' "$_k:"
+    fi
+  done
+  echo "docs: $_GSTACK_DOC"
+  exit 0
+fi
+
+# Plan root: where /context-save and /codex consult write plan files.
+if [ -n "${GSTACK_PLAN_DIR:-}" ]; then
+  _plan_root="$GSTACK_PLAN_DIR"
+elif [ -n "${CLAUDE_PLANS_DIR:-}" ]; then
+  _plan_root="$CLAUDE_PLANS_DIR"
+elif [ -n "${HOME:-}" ]; then
+  _plan_root="$HOME/.claude/plans"
+else
+  _plan_root=".claude/plans"
+fi
+
+# Tmp root: where ephemeral files (codex stderr captures, etc.) live.
+# Honor TMPDIR / TMP for Windows + container compat; fall back to a
+# project-local .gstack/tmp so we never write to a system /tmp that may
+# be read-only or shared.
+if [ -n "${TMPDIR:-}" ]; then
+  _tmp_root="$TMPDIR"
+elif [ -n "${TMP:-}" ]; then
+  _tmp_root="$TMP"
+else
+  _tmp_root=".gstack/tmp"
+fi
+# macOS exports TMPDIR with a trailing slash; mktemp templates built as
+# "$TMP_ROOT/name-XXXXXX" would then carry "//", and any consumer comparing
+# paths gets a spurious mismatch. Strip it (never strips a bare "/"). #2091
+case "$_tmp_root" in
+  */) [ "$_tmp_root" != "/" ] && _tmp_root="${_tmp_root%/}" ;;
+esac
+
+# Strip any trailing slash so consumers can safely concatenate "$TMP_ROOT/name"
+# without producing a double slash. On macOS $TMPDIR ends in `/` by default
+# (e.g. /var/folders/.../T/), which would otherwise yield paths like
+# `…/T//codex-err-…`. Normalizing at the source means every consumer benefits,
+# not just /codex.
+_tmp_root="${_tmp_root%/}"
+# A value of "/" collapses to "" above; restore it so TMP_ROOT is never empty.
+[ -z "$_tmp_root" ] && _tmp_root="/"
+
+# Best-effort mkdir; if it fails (read-only fs, permission denied), the caller
+# will discover that on their own write attempt. Don't fail the eval here.
+mkdir -p "$_tmp_root" 2>/dev/null || true
+
+if [ "${1:-}" = "--get" ]; then
+  case "${2:-}" in
+    GSTACK_STATE_ROOT) printf '%s\n' "$_state_root" ;;
+    PLAN_ROOT) printf '%s\n' "$_plan_root" ;;
+    TMP_ROOT) printf '%s\n' "$_tmp_root" ;;
+    *) echo "usage: gstack-paths --get GSTACK_STATE_ROOT|PLAN_ROOT|TMP_ROOT" >&2; exit 2 ;;
+  esac
+  exit 0
+fi
+
+printf 'GSTACK_STATE_ROOT=%q\n' "$_state_root"
+printf 'PLAN_ROOT=%q\n' "$_plan_root"
+printf 'TMP_ROOT=%q\n' "$_tmp_root"

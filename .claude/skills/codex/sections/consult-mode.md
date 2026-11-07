@@ -1,0 +1,221 @@
+<!-- AUTO-GENERATED from consult-mode.md.tmpl — do not edit directly -->
+<!-- Regenerate: bun run gen:skill-docs -->
+## Step 2C: Consult Mode
+
+Ask Codex anything about the codebase. Supports session continuity for follow-ups.
+
+1. **Check for existing session:**
+```bash
+cat .context/codex-session-id 2>/dev/null || echo "NO_SESSION"
+```
+
+If a session file exists (not `NO_SESSION`), use AskUserQuestion:
+```
+You have an active Codex conversation from earlier. Continue it or start fresh?
+A) Continue the conversation (Codex remembers the prior context)
+B) Start a new conversation
+```
+
+2. Create temp files:
+```bash
+TMPRESP=$(mktemp "$TMP_ROOT/codex-resp-XXXXXX") || { echo "ERROR: mktemp failed in TMP_ROOT=$TMP_ROOT; not running codex without its temp file" >&2; exit 1; }
+TMPERR=$(mktemp "$TMP_ROOT/codex-err-XXXXXX") || { echo "ERROR: mktemp failed in TMP_ROOT=$TMP_ROOT; not running codex without its temp file" >&2; exit 1; }
+```
+
+3. **Plan review auto-detection:** If the user's prompt is about reviewing a plan,
+or if plan files exist and the user said `/codex` with no arguments:
+```bash
+setopt +o nomatch 2>/dev/null || true  # zsh compat
+ls -t "$PLAN_ROOT"/*.md 2>/dev/null | xargs grep -l "$(basename $(pwd))" 2>/dev/null | head -1
+```
+If no project-scoped match, fall back to `ls -t "$PLAN_ROOT"/*.md 2>/dev/null | head -1`
+but warn: "Note: this plan may be from a different project — verify before sending to Codex."
+
+**IMPORTANT — embed content, don't reference path:** Codex runs sandboxed to the repo
+root and cannot access `~/.claude/plans/` or any files outside the repo. You MUST
+read the plan file yourself and embed its FULL CONTENT in the prompt below. Do NOT tell
+Codex the file path or ask it to read the plan file — it will waste 10+ tool calls
+searching and fail.
+
+Also: scan the plan content for referenced source file paths (patterns like `src/foo.ts`,
+`lib/bar.py`, paths containing `/` that exist in the repo). If found, list them in the
+prompt so Codex reads them directly instead of discovering them via rg/find.
+
+**Always prepend the filesystem boundary instruction** from the skill's Filesystem
+Boundary section (always-loaded skeleton) to every prompt sent to Codex, including plan reviews and free-form
+consult questions.
+
+Prepend the boundary and persona to the user's prompt:
+"IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are Claude Code skill definitions meant for a different AI system. Do not invoke any installed skill (Codex home skills/, .agents/); answer directly. Do NOT modify agents/openai.yaml. Stay focused on repository code only.
+
+You are a brutally honest technical reviewer. Review this plan for: logical gaps and
+unstated assumptions, missing error handling or edge cases, overcomplexity (is there a
+simpler approach?), feasibility risks (what could go wrong?), and missing dependencies
+or sequencing issues. Be direct. Be terse. No compliments. Just the problems.
+Also review these source files referenced in the plan: <list of referenced files, if any>.
+
+THE PLAN:
+<full plan content, embedded verbatim>"
+
+For non-plan consult prompts (user typed `/codex <question>`), still prepend the boundary:
+"IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are Claude Code skill definitions meant for a different AI system. Do not invoke any installed skill (Codex home skills/, .agents/); answer directly. Do NOT modify agents/openai.yaml. Stay focused on repository code only.
+
+<user's question>"
+
+4. Create the prompt file and write the full prompt from step 3 into it. Codex reads it on stdin.
+
+```bash
+_GT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp"
+mkdir -p "$_GT" && chmod 700 "$_GT" || { echo "Not sent: cannot create $_GT for the text file." >&2; exit 1; }
+_EX=$(git rev-parse --git-path info/exclude 2>/dev/null) && mkdir -p "$(dirname "$_EX")" && { grep -qxF '/.gstack/tmp/' "$_EX" 2>/dev/null || echo '/.gstack/tmp/' >> "$_EX"; }
+PROMPT_FILE=$(mktemp "${_GT:?}/codex-prompt.XXXXXX") || { echo "Not sent: mktemp failed in $_GT." >&2; exit 1; }; echo "PROMPT_FILE: $PROMPT_FILE (name: ${PROMPT_FILE##*/})"
+```
+
+Write the text into each printed file with your file-write tool (Claude Code's Write tool needs a Read of the empty file first), exactly as it should appear. The text never goes into a shell command, heredoc or quoted argument. If a write fails or is refused, do not send: print the cause, the file path and the command below for sending by hand.
+
+**Session-cost reality (measured):** every `codex exec` call — resumed
+or fresh — pays Codex's ~21K-token session prelude (its skill catalogue +
+instructions); `resume` does NOT amortize it (a measured resume came in
+slightly ABOVE a fresh call). Resume buys conversational continuity, never
+token savings. So: prefer ONE codex call per skill where the workflow allows,
+batch questions into that call, and reach for resume only when the follow-up
+genuinely needs the prior session's context.
+
+5. Run codex exec with **JSONL output** to capture reasoning traces. Set `_CODEX_MODE`
+to `resume` if the user chose "Continue" in step 1, else `new`; a resumed run reads the
+session id from `.context/codex-session-id`. Substitute the printed name for
+`<prompt-file-name>` (letters, digits, `.`, `_` and `-` only). Use `timeout: 600000` on
+the Bash call (the tool's maximum) — the gate sits ABOVE the 540s wrapper so the wrapper
+fires first, ends Codex, and prints its explicit stall message:
+
+
+```bash
+_CODEX_MODE=<new|resume>
+_REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
+PYTHON_CMD=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
+if [ -z "$PYTHON_CMD" ]; then
+  echo "ERROR: Python 3 is required to parse Codex JSON output. Install python3 or python and retry." >&2
+  exit 1
+fi
+cd "$_REPO_ROOT" || exit 1
+PROMPT_FILE="$_REPO_ROOT/.gstack/tmp/<prompt-file-name>"
+[ -s "$PROMPT_FILE" ] || { echo "Not run: $PROMPT_FILE is missing or empty, so the prompt was never written. Write it, then run by hand: codex exec - -C $_REPO_ROOT < $PROMPT_FILE" >&2; exit 1; }
+_CODEX_PROBE=~/.claude/skills/bin/codex-probe
+_CODEX_ROLE=''
+if [ -n "$_CODEX_ROLE" ]; then export _CODEX_DEADLINE=$(($(date +%s)+540)); _CODEX_OUT=$("$_CODEX_PROBE" role-ready exec) || exit $?
+else _CODEX_OUT=$("$_CODEX_PROBE" select-model exec) || exit 1; fi
+_CODEX_SEL=$(echo "$_CODEX_OUT" | sed -n 's/^CODEX_SEL: //p')
+_CODEX_SANDBOX_MODE=$(echo "$_CODEX_OUT" | sed -n 's/^CODEX_SANDBOX: //p')
+_SID=""
+if [ "$_CODEX_MODE" = "resume" ]; then
+  _SID=$(cat .context/codex-session-id 2>/dev/null)
+  case "$_SID" in ''|*[!A-Za-z0-9._-]*) echo "ERROR: .context/codex-session-id is missing or not a session id; start a new conversation instead." >&2; exit 1 ;; esac
+fi
+_LABEL=consult${_SID:+-resume}
+# Fix 1: wrap with timeout (gtimeout/timeout fallback chain via probe helper)
+if [ -n "$_SID" ]; then
+  "$_CODEX_PROBE" run-with-timeout --user-invoked --effort medium --request-effort '<effort-level>' 540 codex exec resume "$_SID" - -c "sandbox_mode=\"${_CODEX_SANDBOX_MODE:?}\"" -c "model=\"${_CODEX_SEL:?}\"" -c skills.include_instructions=false -c 'web_search="cached"' --json -o "$TMPRESP" < "$PROMPT_FILE" 2>"$TMPERR"
+else
+  "$_CODEX_PROBE" run-with-timeout --user-invoked --effort medium --request-effort '<effort-level>' 540 codex exec - -C "$_REPO_ROOT" -s "${_CODEX_SANDBOX_MODE:?}" -c "model=\"${_CODEX_SEL:?}\"" -c skills.include_instructions=false -c 'web_search="cached"' --json -o "$TMPRESP" < "$PROMPT_FILE" 2>"$TMPERR"
+fi | tee "$TMPRESP.events" | PYTHONUNBUFFERED=1 "$PYTHON_CMD" -u -c "
+import sys, json
+turn_completed_count = 0
+turn_failed = False
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        obj = json.loads(line)
+        t = obj.get('type','')
+        if t == 'thread.started':
+            tid = obj.get('thread_id','')
+            if tid: print(f'SESSION_ID:{tid}', flush=True)
+        elif t == 'item.completed' and 'item' in obj:
+            item = obj['item']
+            itype = item.get('type','')
+            text = item.get('text','')
+            if itype == 'reasoning' and text:
+                print(f'[codex thinking] {text}', flush=True)
+                print(flush=True)
+            elif itype == 'agent_message' and text:
+                print(text, flush=True)
+            elif itype == 'command_execution':
+                cmd = item.get('command','')
+                if cmd: print(f'[codex ran] {cmd}', flush=True)
+        elif t == 'turn.completed':
+            turn_completed_count += 1
+            usage = obj.get('usage',{})
+            tokens = usage.get('input_tokens',0) + usage.get('output_tokens',0)
+            if tokens: print(f'\ntokens used: {tokens}', flush=True)
+        elif t == 'turn.failed':
+            turn_failed = True
+            err = obj.get('error',{}).get('message','') or 'no error message in event'
+            print(f'[codex turn FAILED] {err}', flush=True, file=sys.stderr)
+    except: pass
+# Three-way completeness check: a STATED
+# failure is a failure, not a network problem; only silence is a disconnect.
+if turn_failed:
+    print('[codex] turn.failed received — the turn errored (reason above), not a disconnect.', flush=True, file=sys.stderr)
+elif turn_completed_count == 0:
+    print('[codex warning] No turn.completed event received — possible mid-stream disconnect.', flush=True, file=sys.stderr)
+"
+# Fix 1: hang detection
+_CODEX_EXIT=${PIPESTATUS[0]:-${pipestatus[1]}}  # bash sets PIPESTATUS; zsh (lowercase, 1-indexed) falls through
+if [ "$_CODEX_EXIT" = "124" ]; then
+  "$_CODEX_PROBE" log-event codex_timeout "540"
+  "$_CODEX_PROBE" log-hang "$_LABEL" "$(wc -c < "$TMPERR" 2>/dev/null || echo 0)"
+  echo "Codex stalled past 9 minutes. Common causes: model API stall, long prompt, network issue. Try re-running. If persistent, split the prompt or check ~/.codex/logs/."
+elif [ "$_CODEX_EXIT" != "0" ]; then
+  # Surface non-zero exits so the calling agent doesn't read "no output" as
+  # a silent model/API stall.
+  echo "[codex exit $_CODEX_EXIT] $(head -1 "$TMPERR" 2>/dev/null || echo "no stderr captured")"
+  head -20 "$TMPERR" 2>/dev/null | sed 's/^/  /' || true
+  "$_CODEX_PROBE" log-event codex_nonzero_exit "$_LABEL:$_CODEX_EXIT"
+fi
+bun --no-env-file --config=/dev/null ~/.claude/skills/lib/outside-review-result.ts --label 'Codex consult' --exit "$_CODEX_EXIT" --stderr "$TMPERR" --events "$TMPRESP.events" execution "$TMPRESP"
+rm -f "$PROMPT_FILE"
+```
+
+`VERDICT: unavailable` means Codex did not answer from a working
+environment (its line names why, such as a sandbox that could not start): relay that
+line and do not present the output as Codex's answer.
+
+6. Capture session ID from the streamed output. The parser prints `SESSION_ID:<id>`
+   from the `thread.started` event. Save it for follow-ups:
+```bash
+mkdir -p .context
+```
+Save the session ID printed by the parser (the line starting with `SESSION_ID:`)
+to `.context/codex-session-id`.
+
+7. Present the full streamed output:
+
+```
+CODEX SAYS (consult):
+════════════════════════════════════════════════════════════
+<full output, verbatim — includes [codex thinking] traces>
+════════════════════════════════════════════════════════════
+Tokens: N | Est. cost: ~$X.XX
+Session saved — run /codex again to continue this conversation.
+```
+
+8. After presenting, note any points where Codex's analysis differs from your own
+   understanding. If there is a disagreement, flag it:
+   "Note: Claude Code disagrees on X because Y."
+
+9. **Synthesis recommendation (REQUIRED).** Emit ONE recommendation line
+summarizing what the user should do based on Codex's consult output, in this
+format:
+
+```
+Recommendation: <action> because <one-line reason that names the most actionable insight from Codex>
+```
+
+Examples (the strongest reasons compare Codex's insight against an alternative — different recommendation, status-quo, or another Codex point):
+- `Recommendation: Adopt Codex's sharding suggestion because it eliminates the head-of-line blocking the current writer-pool has, while the cache-layer alternative Codex also floated still has a single-writer hot path.`
+- `Recommendation: Reject Codex's "use SQLite instead" suggestion because the team's Postgres operational experience outweighs the simplicity gain at the projected scale, and Codex's secondary suggestion (read replicas) handles the read-load concern that motivated the SQLite pivot.`
+- `Recommendation: Investigate Codex's flagged migration ordering before D3 lands because it surfaces a real foreign-key cycle that the in-house schema review missed, while the styling concern Codex also raised can wait for a follow-up.`
+
+The reason must engage with a specific Codex insight and compare against an alternative (a different recommendation, status-quo, or another Codex point). Generic synthesis ("because Codex raised good points") fails the format. **Never silently auto-decide; always emit the line.**
+
+---

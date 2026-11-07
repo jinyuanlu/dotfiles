@@ -7,11 +7,30 @@
 #     if no URL is passed. Exits 0 with one of: read-write, read-only,
 #     deny, unset.
 #
+#   gstack-gbrain-repo-policy get --batch
+#     Read remote URLs from stdin (one per line); print one tier per line
+#     in input order: read-write, read-only, deny, or none (no entry / no
+#     store). A corrupt store is a hard error (exit 2), NEVER quarantined:
+#     batch callers are unattended ingest gates that must fail closed
+#     rather than bypass a set policy.
+#
 #   gstack-gbrain-repo-policy set <remote-url> <read-write|read-only|deny>
-#     Persist a tier for the given remote. Exits 0 on success.
+#     Persist a tier for the given remote. Exits 0 on success. Changing a
+#     remote's tier clears its Memorable recall opt-in.
+#
+#   gstack-gbrain-repo-policy memorable get [<remote-url>]
+#     Print "<tier>\t<allow|off>": the tier (as `get` prints it) and whether
+#     Memorable recall is opted in for this remote. Read-only lookup for the
+#     recall hook: a corrupt store is a hard error (exit 2), never quarantined.
+#
+#   gstack-gbrain-repo-policy memorable set <remote-url> <allow|off>
+#     Opt a read-only remote in to (or back out of) Memorable recall. Off by
+#     default. Refused unless the remote's tier is read-only: a deny tier
+#     always vetoes recall, and read-write never needed an opt-in.
 #
 #   gstack-gbrain-repo-policy list
-#     Print every entry as "<key>\t<tier>", sorted by key.
+#     Print every entry as "<key>\t<tier>", sorted by key, with a third
+#     column "memorable=allow" on remotes opted in to Memorable recall.
 #
 #   gstack-gbrain-repo-policy normalize <url>
 #     Print the normalized (canonical) key for a given remote URL.
@@ -26,8 +45,11 @@
 #   {
 #     "_schema_version": 2,
 #     "github.com/foo/bar": "read-write",
-#     "github.com/baz/qux": "deny"
+#     "github.com/baz/qux": "deny",
+#     "_memorable_recall": { "github.com/foo/bar": "allow" }
 #   }
+#   The keys _schema_version and _memorable_recall are reserved; other keys
+#   name remotes (including the _unattributed sentinel memory-ingest uses).
 #
 # Tier semantics:
 #   read-write — agent may search AND write new pages from this repo.
@@ -36,6 +58,11 @@
 #                decision.)
 #   deny       — no gbrain interaction at all.
 #
+# Memorable recall opt-in: the recall hook skips deny and read-only remotes.
+# A read-only remote listed in _memorable_recall with exactly "allow" is
+# recalled anyway; any other value or shape counts as off. Every store that
+# makes the remote read-only (see the merge below) must opt it in.
+#
 # Legacy migration:
 #   On any read of a file missing `_schema_version` (or with version < 2),
 #   legacy `allow` values are atomically rewritten to `read-write`, and
@@ -43,12 +70,22 @@
 #   migration actually changes anything. Idempotent: running twice is safe.
 #
 # Env:
-#   GSTACK_HOME — override ~/.gstack state directory (aligns with other
-#                 gstack-* bins; used heavily in tests).
+#   GSTACK_HOME — override the state root (the shared chain in
+#                 bin/gstack-state-root.sh; used heavily in tests).
+#
+# Deny tiers merge across state roots: when the resolved root is not
+# ~/.gstack, `get` also reads ~/.gstack/gbrain-repo-policy.json and returns
+# its deny or read-only tier when that is more restrictive. Nothing is written
+# there. Docs: https://github.com/garrytan/gstack/blob/main/docs/state-root.md
 set -euo pipefail
 
-STATE_DIR="${GSTACK_HOME:-$HOME/.gstack}"
+. "$(dirname "$0")/state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select
+STATE_DIR="$_gstack_sr_root"
 POLICY_FILE="$STATE_DIR/gbrain-repo-policy.json"
+gstack_legacy_root_select
+LEGACY_POLICY_FILE=""
+[ -n "$_gstack_legacy_root" ] && [ -f "$_gstack_legacy_root/gbrain-repo-policy.json" ] && LEGACY_POLICY_FILE="$_gstack_legacy_root/gbrain-repo-policy.json"
 SCHEMA_VERSION=2
 
 die() { echo "gstack-gbrain-repo-policy: $*" >&2; exit 2; }
@@ -85,14 +122,23 @@ normalize() {
   case "$head" in
     *:*) url=$(printf '%s' "$url" | sed 's|:|/|') ;;
   esac
+  # Lowercase BEFORE the suffix strips so a `.GIT` suffix still strips —
+  # parity with lib/gstack-memory-helpers' canonicalizeRemote, which strips
+  # `.git` case-insensitively. GitHub and most hosts are case-insensitive on
+  # paths anyway; collapsing avoids duplicate entries for "Foo/Bar" vs
+  # "foo/bar". (Parity is pinned by test/gbrain-repo-policy-client.test.ts:
+  # a key set through THIS normalize must be found via the canonicalized form
+  # memory-ingest passes to `get --batch`.)
+  url=$(printf '%s' "$url" | tr '[:upper:]' '[:lower:]')
+  # Strip trailing slash(es) FIRST, so ".git/" still loses its suffix (same
+  # order as canonicalizeRemote — slash-first, then .git, then re-strip).
+  while [ "${url%/}" != "$url" ]; do url="${url%/}"; done
   # Strip trailing .git
   url="${url%.git}"
-  # Strip trailing /
-  url="${url%/}"
-  # Lowercase the whole thing. GitHub and most hosts are case-insensitive on
-  # paths anyway; collapsing avoids duplicate entries for "Foo/Bar" vs
-  # "foo/bar".
-  printf '%s\n' "$url" | tr '[:upper:]' '[:lower:]'
+  # Re-strip trailing slash(es): a path remote ending in a `.git` directory
+  # component ("/repo/.git") exposes a new trailing slash once .git is gone.
+  while [ "${url%/}" != "$url" ]; do url="${url%/}"; done
+  printf '%s\n' "$url"
 }
 
 # ensure_file — create the policy file if missing, migrate if legacy.
@@ -161,10 +207,99 @@ ensure_file() {
   fi
 }
 
+# memorable_optin FILE KEY — "allow" when FILE's _memorable_recall map holds
+# exactly the string "allow" for KEY; any other value or shape is "off".
+memorable_optin() {
+  jq -r --arg key "$2" '(._memorable_recall | if type == "object" then .[$key] else null end) as $v
+    | if $v == "allow" then "allow" else "off" end' "$1"
+}
+
+# jq filter that removes $key's opt-in (and an emptied map).
+DROP_MEMORABLE_OPTIN='if (._memorable_recall | type) == "object" then (._memorable_recall |= del(.[$key])) | (if ._memorable_recall == {} then del(._memorable_recall) else . end) else . end'
+
+# _schema_version and _memorable_recall hold store metadata; a remote that
+# normalizes to one of them cannot be stored.
+reject_reserved_key() {
+  case "$1" in
+    _schema_version|_memorable_recall) die "'$1' is a reserved key in the policy store, not a remote" ;;
+  esac
+}
+
+_tier_rank() {
+  case "$1" in deny) echo 0 ;; read-only) echo 1 ;; read-write) echo 2 ;; *) echo 3 ;; esac
+}
+
+# merge_legacy_tier KEY TIER — TIER, or the other root's deny/read-only tier
+# when that is more restrictive. Never more permissive than TIER.
+merge_legacy_tier() {
+  local key="$1" tier="$2" other
+  if [ -z "$LEGACY_POLICY_FILE" ]; then printf '%s\n' "$tier"; return 0; fi
+  other=$(jq -r --arg key "$key" '.[$key] // "none"' "$LEGACY_POLICY_FILE" 2>/dev/null) || other="none"
+  case "$other" in
+    deny|read-only)
+      if [ "$(_tier_rank "$other")" -lt "$(_tier_rank "$tier")" ]; then tier="$other"; fi ;;
+  esac
+  printf '%s\n' "$tier"
+}
+
+# get --batch — bulk lookup for ingest gates. One URL per stdin line, one
+# tier per stdout line, input order preserved. Reuses normalize() (the same
+# code path single `get` uses) per line. Prints `none` where single `get`
+# prints `unset` — batch consumers (lib/gbrain-repo-policy-client.ts) speak
+# the RepoPolicyTierValue vocabulary directly.
+#
+# Corruption polarity differs from single `get` ON PURPOSE: interactive
+# `get` quarantines a corrupt store and starts fresh because /setup-gbrain
+# re-asks the user; a batch caller is an unattended ingest gate with nobody
+# to re-ask, so silently quarantining would BYPASS a set deny policy. Batch
+# fails hard (exit 2) instead and names the recovery path.
+cmd_get_batch() {
+  require_jq
+  if [ -n "$LEGACY_POLICY_FILE" ] && ! jq empty "$LEGACY_POLICY_FILE" 2>/dev/null; then
+    die "policy store $LEGACY_POLICY_FILE is corrupt (invalid JSON) — refusing batch read. Inspect or remove it; its deny tiers apply to every state root."
+  fi
+  if [ ! -f "$POLICY_FILE" ] && [ -n "$LEGACY_POLICY_FILE" ]; then
+    local url key
+    while IFS= read -r url || [ -n "$url" ]; do
+      key=$(normalize "$url")
+      if [ -z "$key" ]; then printf 'none\n'; continue; fi
+      merge_legacy_tier "$key" none
+    done
+    return 0
+  fi
+  if [ ! -f "$POLICY_FILE" ]; then
+    # No store = no policy was ever set. Every URL is `none`; don't create
+    # the file just for a read (matches cmd_list).
+    while IFS= read -r url || [ -n "$url" ]; do
+      printf 'none\n'
+    done
+    return 0
+  fi
+  if ! jq empty "$POLICY_FILE" 2>/dev/null; then
+    die "policy store $POLICY_FILE is corrupt (invalid JSON) — refusing batch read. Inspect with: gstack-gbrain-repo-policy list; re-run /setup-gbrain to rebuild the store."
+  fi
+  # Valid JSON from here, so ensure_file only performs the legacy
+  # allow → read-write migration (never the quarantine branch).
+  ensure_file
+  local url key
+  while IFS= read -r url || [ -n "$url" ]; do
+    key=$(normalize "$url")
+    if [ -z "$key" ]; then
+      printf 'none\n'
+      continue
+    fi
+    merge_legacy_tier "$key" "$(jq -r --arg key "$key" '.[$key] // "none"' "$POLICY_FILE")"
+  done
+}
+
 cmd_get() {
   local url="${1:-}"
+  if [ "$url" = "--batch" ]; then
+    cmd_get_batch
+    return 0
+  fi
   if [ -z "$url" ]; then
-    url=$(git remote get-url origin 2>/dev/null || true)
+    url=$(git config --get remote.origin.url 2>/dev/null || true)
     if [ -z "$url" ]; then
       echo "unset"
       return 0
@@ -177,7 +312,13 @@ cmd_get() {
     return 0
   fi
   ensure_file
-  jq -r --arg key "$key" '.[$key] // "unset"' "$POLICY_FILE"
+  local tier
+  tier=$(jq -r --arg key "$key" '.[$key] // "unset"' "$POLICY_FILE")
+  if [ -n "$LEGACY_POLICY_FILE" ] && ! jq empty "$LEGACY_POLICY_FILE" 2>/dev/null; then
+    echo "gstack-gbrain-repo-policy: ignoring corrupt $LEGACY_POLICY_FILE (inspect or remove it)" >&2
+    LEGACY_POLICY_FILE=""
+  fi
+  merge_legacy_tier "$key" "$tier"
 }
 
 cmd_set() {
@@ -192,13 +333,146 @@ cmd_set() {
   local key
   key=$(normalize "$url")
   [ -z "$key" ] && die "cannot normalize remote URL: $url"
+  reject_reserved_key "$key"
   ensure_file
-  local tmp
+  local previous opted tmp
+  previous=$(jq -r --arg key "$key" '.[$key] // "unset"' "$POLICY_FILE")
+  opted=$(memorable_optin "$POLICY_FILE" "$key")
   tmp=$(mktemp "$POLICY_FILE.tmp.XXXXXX")
-  jq --arg key "$key" --arg tier "$tier" '.[$key] = $tier' "$POLICY_FILE" > "$tmp"
+  if [ "$previous" != "$tier" ]; then
+    jq --arg key "$key" --arg tier "$tier" ".[\$key] = \$tier | $DROP_MEMORABLE_OPTIN" "$POLICY_FILE" > "$tmp"
+  else
+    jq --arg key "$key" --arg tier "$tier" '.[$key] = $tier' "$POLICY_FILE" > "$tmp"
+  fi
   mv "$tmp" "$POLICY_FILE"
   chmod 0600 "$POLICY_FILE"
   echo "Set $key → $tier"
+  if [ "$previous" != "$tier" ] && [ "$opted" = "allow" ]; then
+    echo "Cleared the Memorable recall opt-in for $key (the tier changed; opt in again with: gstack-gbrain-repo-policy memorable set $key allow)"
+  fi
+}
+
+# memorable_store_answer FILE KEY — "<tier> <allow|off>" for KEY in one store,
+# read from a single snapshot of the file with no write, migration or
+# quarantine (tier is none when the file or the key is absent; a legacy
+# "allow" reads as read-write in memory). Dies (exit 2) on anything else: a
+# path that is present but not a readable regular file, a path whose
+# existence cannot be confirmed (an unsearchable ancestor), content that is not exactly one JSON object, or a
+# present key whose value is not a known tier.
+memorable_store_answer() {
+  local store="$1" key="$2" up raw
+  if ! [ -e "$store" ] && ! [ -L "$store" ]; then
+    # Absent only if the nearest existing ancestor is a searchable directory:
+    # an unsearchable one hides an existing store from every test above.
+    up=$(dirname "$store")
+    while ! [ -e "$up" ] && ! [ -L "$up" ] && [ "$up" != "/" ] && [ "$up" != "." ]; do up=$(dirname "$up"); done
+    if [ -d "$up" ] && [ -x "$up" ]; then
+      printf 'none off\n'
+      return 0
+    fi
+    die "cannot confirm whether $store exists ($up is not a searchable directory) — refusing the Memorable recall lookup."
+  fi
+  if ! [ -f "$store" ] || ! [ -r "$store" ]; then
+    die "policy store $store exists but is not a readable file — refusing the Memorable recall lookup. Inspect or remove it."
+  fi
+  raw=$(cat -- "$store") || die "cannot read policy store $store — refusing the Memorable recall lookup."
+  printf '%s' "$raw" | jq -e -s -r --arg key "$key" '
+    if length == 1 and (.[0] | type) == "object" then .[0] else error("not one JSON object") end
+    | (if has($key) then
+         (.[$key] | if . == "allow" then "read-write"
+                    elif . == "deny" or . == "read-only" or . == "read-write" then .
+                    else error("invalid tier") end)
+       else "none" end) as $tier
+    | ((._memorable_recall | if type == "object" then .[$key] else null end) == "allow") as $opt
+    | "\($tier) \(if $opt then "allow" else "off" end)"' 2>/dev/null \
+    || die "policy store $store is corrupt (not one JSON object, or an invalid tier for $key) — refusing the Memorable recall lookup. Inspect with: gstack-gbrain-repo-policy list; re-run /setup-gbrain to rebuild the store."
+}
+
+# memorable get — tier plus the effective Memorable recall opt-in, for the
+# recall hook. Pure read: each store is read once, never migrated, never
+# quarantined, and any doubt about a present store is a hard error (exit 2),
+# because reading it as "no policy" would silently lift a deny or read-only
+# veto. The tier merges as get does (the ~/.gstack store contributes only deny
+# or read-only). The opt-in counts only when the merged tier is read-only and
+# every store that restricts the remote (deny or read-only) opts it in, so an
+# opt-in can never relax a restriction another store imposed.
+cmd_memorable_get() {
+  local url="${1:-}"
+  require_jq
+  if [ -z "$url" ]; then
+    url=$(git config --get remote.origin.url 2>/dev/null || true)
+  fi
+  local key
+  key=$(normalize "$url")
+  if [ -z "$key" ]; then
+    printf 'unset\toff\n'
+    return 0
+  fi
+  local answer p_tier p_opt l_tier="none" l_opt="off"
+  answer=$(memorable_store_answer "$POLICY_FILE" "$key") || exit 2
+  read -r p_tier p_opt <<<"$answer"
+  if [ -n "$_gstack_legacy_root" ]; then
+    answer=$(memorable_store_answer "$_gstack_legacy_root/gbrain-repo-policy.json" "$key") || exit 2
+    read -r l_tier l_opt <<<"$answer"
+  fi
+  local merged="$p_tier"
+  case "$l_tier" in
+    deny|read-only)
+      if [ "$(_tier_rank "$l_tier")" -lt "$(_tier_rank "$merged")" ]; then merged="$l_tier"; fi ;;
+  esac
+  if [ "$merged" != "read-only" ]; then
+    [ "$merged" = "none" ] && merged="unset"
+    printf '%s\toff\n' "$merged"
+    return 0
+  fi
+  local optin="allow"
+  case "$p_tier" in deny|read-only) [ "$p_opt" = "allow" ] || optin="off" ;; esac
+  case "$l_tier" in deny|read-only) [ "$l_opt" = "allow" ] || optin="off" ;; esac
+  printf 'read-only\t%s\n' "$optin"
+}
+
+cmd_memorable_set() {
+  local url="${1:-}" value="${2:-}"
+  if [ -z "$url" ] || [ -z "$value" ]; then die "usage: memorable set <remote-url> <allow|off>"; fi
+  case "$value" in
+    allow|off) ;;
+    *) die "invalid value '$value' (must be allow or off)" ;;
+  esac
+  local key
+  key=$(normalize "$url")
+  [ -z "$key" ] && die "cannot normalize remote URL: $url"
+  reject_reserved_key "$key"
+  if [ "$value" = "allow" ]; then
+    local current
+    current=$(cmd_memorable_get "$url" | cut -f1)
+    case "$current" in
+      read-only) ;;
+      deny) die "$key is deny: a deny tier always vetoes Memorable recall, so an opt-in is refused. Change the tier first if you mean it: gstack-gbrain-repo-policy set $key read-only" ;;
+      *) die "$key is $current, not read-only: the opt-in only applies to read-only remotes (read-write is already recalled; an unset remote has no veto)" ;;
+    esac
+  fi
+  ensure_file
+  local tmp
+  tmp=$(mktemp "$POLICY_FILE.tmp.XXXXXX")
+  if [ "$value" = "allow" ]; then
+    jq --arg key "$key" '._memorable_recall = ((._memorable_recall | if type == "object" then . else {} end) + {($key): "allow"})' "$POLICY_FILE" > "$tmp"
+  else
+    jq --arg key "$key" "$DROP_MEMORABLE_OPTIN" "$POLICY_FILE" > "$tmp"
+  fi
+  mv "$tmp" "$POLICY_FILE"
+  chmod 0600 "$POLICY_FILE"
+  echo "Set $key memorable recall → $value"
+  if [ "$value" = "allow" ] && [ "$(cmd_memorable_get "$url" | cut -f2)" != "allow" ]; then
+    echo "gstack-gbrain-repo-policy: $LEGACY_POLICY_FILE also makes $key read-only and does not opt it in, so recall stays off. Opt in there too: GSTACK_STATE_ROOT=$_gstack_legacy_root gstack-gbrain-repo-policy memorable set $key allow" >&2
+  fi
+}
+
+cmd_memorable() {
+  case "${1:-}" in
+    get) shift; cmd_memorable_get "$@" ;;
+    set) shift; cmd_memorable_set "$@" ;;
+    *) die "usage: memorable {get [<remote-url>]|set <remote-url> <allow|off>}" ;;
+  esac
 }
 
 cmd_list() {
@@ -207,7 +481,9 @@ cmd_list() {
     return 0
   fi
   ensure_file
-  jq -r 'to_entries[] | select(.key != "_schema_version") | "\(.key)\t\(.value)"' "$POLICY_FILE" | sort
+  jq -r '(._memorable_recall | if type == "object" then . else {} end) as $m
+    | to_entries[] | select(.key != "_schema_version" and .key != "_memorable_recall")
+    | "\(.key)\t\(.value)" + (if $m[.key] == "allow" then "\tmemorable=allow" else "" end)' "$POLICY_FILE" | sort
 }
 
 cmd_normalize() {
@@ -220,8 +496,9 @@ case "${1:-}" in
   get) shift; cmd_get "$@" ;;
   set) shift; cmd_set "$@" ;;
   list) shift; cmd_list "$@" ;;
+  memorable) shift; cmd_memorable "$@" ;;
   normalize) shift; cmd_normalize "$@" ;;
-  --help|-h|help) sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//' ;;
-  "") die "usage: gstack-gbrain-repo-policy {get|set|list|normalize|--help}" ;;
+  --help|-h|help) sed -n '2,73p' "$0" | sed 's/^# \{0,1\}//' ;;
+  "") die "usage: gstack-gbrain-repo-policy {get|set|memorable|list|normalize|--help}" ;;
   *) die "unknown subcommand: $1" ;;
 esac

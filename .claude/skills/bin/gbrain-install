@@ -36,6 +36,7 @@
 #   2 — prerequisite missing or invalid argument
 #   3 — post-install validation failed (PATH shadow, broken binary, etc.)
 set -euo pipefail
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 
 # --- defaults ---
 # No version pin by default — install the latest default-branch HEAD (#1744).
@@ -84,10 +85,30 @@ if ! $VALIDATE_ONLY; then
   # GitHub reachability — fail fast if offline rather than hanging `git clone`.
   # --max-time 10, --head (no body), quiet. Status code 200-4xx means we reached
   # the server (even 404 is reachability proof).
-  if ! curl -s --head --max-time 10 https://github.com >/dev/null 2>&1; then
+  #
+  # Skipped under --dry-run: a dry run prints a plan and exits without ever
+  # cloning, so requiring the network buys nothing and costs a real failure mode.
+  # It made `--dry-run` fail (exit 3, "cannot reach https://github.com") whenever
+  # the curl lost a race for sockets/DNS — reproducible at ~15% by running 60
+  # dry-runs concurrently, and the cause of intermittent red in the D5 tests,
+  # which call this exact path.
+  if ! $DRY_RUN && ! curl -s --head --max-time 10 https://github.com >/dev/null 2>&1; then
     fail "cannot reach https://github.com. Check your network and try again."
   fi
 fi
+
+# Read a string field (dotted path, e.g. bin.gbrain) from a package.json with
+# bun, which this installer already requires. It used to need jq, which it
+# never checked for, so a successful install reported failure (#1675).
+pkg_field() {
+  GSTACK_PKG_JSON="$1" GSTACK_PKG_FIELD="$2" bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e '
+    try {
+      const pkg = JSON.parse(require("fs").readFileSync(process.env.GSTACK_PKG_JSON, "utf8"));
+      const v = process.env.GSTACK_PKG_FIELD.split(".").reduce((o, k) => (o == null ? o : o[k]), pkg);
+      if (typeof v === "string") process.stdout.write(v);
+    } catch {}
+  ' 2>/dev/null || true
+}
 
 # --- D5 detect-first: probe common locations before cloning fresh ---
 # Accept any directory that looks like a gbrain clone: has package.json
@@ -98,10 +119,10 @@ is_valid_clone() {
   [ -d "$dir" ] || return 1
   [ -f "$dir/package.json" ] || return 1
   local name
-  name=$(jq -r '.name // empty' "$dir/package.json" 2>/dev/null || true)
+  name=$(pkg_field "$dir/package.json" name)
   [ "$name" = "gbrain" ] || return 1
   local bin
-  bin=$(jq -r '.bin.gbrain // empty' "$dir/package.json" 2>/dev/null || true)
+  bin=$(pkg_field "$dir/package.json" bin.gbrain)
   [ -n "$bin" ] || return 1
   return 0
 }
@@ -168,21 +189,43 @@ if ! $VALIDATE_ONLY; then
   ( cd "$INSTALL_DIR" && bun link --silent )
 fi
 
+# #2487: an npm-installed bun (`npm i -g bun`) puts a POSIX script + .cmd/.ps1
+# shims on %PATH% but never bun.exe — and the gbrain.exe shim that `bun link`
+# generates resolves bun.exe SPECIFICALLY. Link "succeeds", then every gbrain
+# call dies with bun's misleading "bun is not installed in %PATH%" (suggesting
+# a second parallel bun install). Detect the condition and name the real fix:
+# bun's own process.execPath IS the hidden bun.exe.
+_bun_exe_hint() {
+  [ "$IS_WINDOWS" -eq 1 ] || return 0
+  command -v bun.exe >/dev/null 2>&1 && return 0
+  local real_bun
+  real_bun=$(bun --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" -e 'console.log(process.execPath)' 2>/dev/null | tr -d '\r' || true)
+  echo "  detected: bun was installed via npm — bun.exe is NOT on %PATH%, and the gbrain.exe shim needs it." >&2
+  if [ -n "$real_bun" ]; then
+    echo "  fix: add bun.exe's directory to PATH (persist it in your shell profile):" >&2
+    echo "       export PATH=\"$(dirname "$real_bun"):\$PATH\"" >&2
+  else
+    echo "  fix: install bun via the official installer (https://bun.sh) or add the directory containing bun.exe to %PATH%." >&2
+  fi
+}
+
 # --- D19 PATH-shadowing validation ---
 # Read the version from the install-dir's package.json; compare to
 # `gbrain --version`. If they disagree, PATH is returning a DIFFERENT
 # gbrain than the one we just linked. Fail hard with remediation.
-expected_version=$(jq -r '.version // empty' "$INSTALL_DIR/package.json" 2>/dev/null || true)
+expected_version=$(pkg_field "$INSTALL_DIR/package.json" version)
 if [ -z "$expected_version" ]; then
   fail "cannot read version from $INSTALL_DIR/package.json (install may be broken)"
 fi
 
 if ! command -v gbrain >/dev/null 2>&1; then
+  _bun_exe_hint
   fail "bun link completed but 'gbrain' is not on PATH. Ensure ~/.bun/bin is in your PATH."
 fi
 
 actual_version=$(gbrain --version 2>/dev/null | head -1 | awk '{print $NF}' | tr -d '[:space:]' || true)
 if [ -z "$actual_version" ]; then
+  _bun_exe_hint
   fail "gbrain is on PATH but 'gbrain --version' produced no output — the binary may be broken."
 fi
 
@@ -235,7 +278,14 @@ fi
 # a hard gate so a broken gbrain is caught at setup, not at data-loss time.
 # Pre-init installs skip this (config not written yet); the full
 # `/sync-gbrain --dry-run` self-test runs from /setup-gbrain after `gbrain init`.
-_GBRAIN_HOME_CHECK="${GBRAIN_HOME:-$HOME/.gbrain}"
+# #2521: GBRAIN_HOME is a PARENT dir per gbrain's configDir() contract —
+# gbrain appends `.gbrain` itself, so the config lives at
+# $GBRAIN_HOME/.gbrain/config.json (or ~/.gbrain/config.json when unset).
+if [ -n "${GBRAIN_HOME:-}" ]; then
+  _GBRAIN_HOME_CHECK="$GBRAIN_HOME/.gbrain"
+else
+  _GBRAIN_HOME_CHECK="$HOME/.gbrain"
+fi
 if [ -f "$_GBRAIN_HOME_CHECK/config.json" ]; then
   if ! gbrain doctor --fast >/dev/null 2>&1; then
     echo "" >&2

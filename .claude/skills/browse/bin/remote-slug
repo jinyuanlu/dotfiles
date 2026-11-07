@@ -1,14 +1,27 @@
 #!/usr/bin/env bash
-# Output the remote slug (owner-repo) for the current git repo.
+# Output the remote slug for the current git repo.
 # Used by SKILL.md files to derive project-specific paths in ~/.gstack/projects/.
+# The slug rule (owner-repo for 2-segment remotes, "<last-two>-<16 hex>" for
+# 3+-segment nested-group remotes, #3003) is shared with bin/gstack-slug through
+# bin/gstack-remote-identity.sh.
 set -e
+. "$(dirname "$0")/../../bin/gstack-remote-identity.sh" 2>/dev/null || { echo "$0: bin/gstack-remote-identity.sh is missing. fix: reinstall with ./setup or /gstack-upgrade" >&2; exit 1; }
+# A counted .gstack-project marker (#2649, #1923), found on the cwd chain or
+# from a linked worktree's main checkout, decides identity the way bin/gstack-slug
+# does, so design-doc lookups find docs where skills saved them.
+_id=$("$(dirname "$0")/../../bin/gstack-slug" --identity 2>/dev/null || true)
+_marker=$(printf '%s\n' "$_id" | sed -n 's/^PROJECT_MARKER=//p')
+if [ -n "$_marker" ] && [ "$_marker" != "''" ]; then
+  printf '%s\n' "$_id" | sed -n 's/^SLUG=//p'
+  exit 0
+fi
 URL=$(git remote get-url origin 2>/dev/null || true)
+_gri_slug=""
 if [ -n "$URL" ]; then
-  # Strip trailing .git if present, then extract owner/repo
-  URL="${URL%.git}"
-  # Handle both SSH (git@host:owner/repo) and HTTPS (https://host/owner/repo)
-  OWNER_REPO=$(echo "$URL" | sed -E 's#.*[:/]([^/]+)/([^/]+)$#\1-\2#')
-  echo "$OWNER_REPO"
+  gstack_remote_slug "$URL"
+fi
+if [ -n "$_gri_slug" ]; then
+  echo "$_gri_slug"
 else
   basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 fi
