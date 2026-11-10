@@ -4,6 +4,10 @@ alias ee=emacsclient
 alias trf=terraform
 alias ls='ls --color=auto'
 alias claude='claude --dangerously-skip-permissions --mcp-config $HOME/.claude/mcp.json'
+# ccc = Claude Code on the ctw account. Own login (keychain entry is keyed by
+# CLAUDE_CONFIG_DIR), own sessions/memory; rules/skills/settings symlinked from ~/.claude.
+# Chains through `claude`, so it keeps the flags above and cmux's wrapper.
+alias ccc='CLAUDE_CONFIG_DIR=$HOME/.claude-ctw claude'
 
 # Git/GitHub identity switch — sets local user.email + flips active gh account.
 # Run inside the target repo. Requires `gh auth login` for both accounts first.
